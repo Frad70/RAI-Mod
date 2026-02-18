@@ -16,12 +16,13 @@ public final class BaseDefenseGoal implements Goal {
         context.survivor().memory().combatLog().append("Switching to BASE_DEFENSE near home territory");
         context.integrations().voiceChat().broadcastSquadPing(context.survivor().id(), "home_under_attack");
 
-        Entity target = context.server().overworld().getNearestPlayer(context.survivor().fakePlayer(), 28.0);
+        Entity target = context.server().overworld().getNearestPlayer(context.survivor(), 28.0);
         if (target != null) {
             float accuracy = context.integrations().physicalStats().getAccuracySkill(context.survivor().id());
             context.integrations().tacz().calculateLeadShot(
+                context.survivor(),
                 target,
-                context.survivor().fakePlayer().getMainHandItem(),
+                context.survivor().getMainHandItem(),
                 context.config().baseAimScatterDegrees(),
                 accuracy
             );

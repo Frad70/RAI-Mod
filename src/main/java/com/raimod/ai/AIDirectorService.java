@@ -37,7 +37,8 @@ public final class AIDirectorService {
         integrationRegistry.tick(server);
 
         List<SimulatedSurvivor> all = persistence.activeSurvivors(server.overworld());
-        all.forEach(bot -> bot.tick(server, integrationRegistry, config));
+        all.forEach(bot -> bot.configureRuntime(integrationRegistry, config));
+        all.forEach(SimulatedSurvivor::tick);
 
         if (all.size() < config.maxPlayers()) {
             spawnMissingSurvivors(server, config.maxPlayers() - all.size());
@@ -71,13 +72,17 @@ public final class AIDirectorService {
         List<SimulatedSurvivor> restored = persistence.restore(server.overworld(), config);
         LOGGER.info("Restored {} simulated survivors from persistent storage", restored.size());
 
-        restored.forEach(bot -> bot.resetRuntime(config));
+        restored.forEach(bot -> {
+            bot.configureRuntime(integrationRegistry, config);
+            bot.resetRuntime(config);
+        });
     }
 
     private void spawnMissingSurvivors(MinecraftServer server, int missing) {
         List<SimulatedSurvivor> spawned = new ArrayList<>();
         for (int i = 0; i < missing; i++) {
             SimulatedSurvivor survivor = SimulatedSurvivor.bootstrap(UUID.randomUUID(), config, server.overworld());
+            survivor.configureRuntime(integrationRegistry, config);
             persistence.store(server.overworld(), survivor);
             spawned.add(survivor);
         }

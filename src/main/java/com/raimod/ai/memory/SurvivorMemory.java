@@ -5,7 +5,9 @@ import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.Deque;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 import net.minecraft.core.BlockPos;
 import net.minecraft.server.MinecraftServer;
@@ -15,16 +17,22 @@ public final class SurvivorMemory {
     private final List<RaidTargetKnowledge> raidTargets;
     private final List<WorldKnowledgePoint> worldPoints;
     private final List<BlockPos> dangerousBlocks;
+    private final List<BlockPos> knownChests;
+    private final Map<UUID, Integer> relationMatrix;
     private final Deque<String> combatLog;
     private SurvivorState.TacticalMode currentMode;
+    private BlockPos homePosition;
 
     private SurvivorMemory(UUID survivorId) {
         this.survivorId = survivorId;
         this.raidTargets = new ArrayList<>();
         this.worldPoints = new ArrayList<>();
         this.dangerousBlocks = new ArrayList<>();
+        this.knownChests = new ArrayList<>();
+        this.relationMatrix = new HashMap<>();
         this.combatLog = new ArrayDeque<>();
         this.currentMode = SurvivorState.TacticalMode.SCOUTING;
+        this.homePosition = BlockPos.ZERO;
     }
 
     public static SurvivorMemory createEmpty(UUID survivorId) {
@@ -36,9 +44,7 @@ public final class SurvivorMemory {
     }
 
     public RaidTargetKnowledge bestRaidCandidate() {
-        return raidTargets.stream()
-            .max(Comparator.comparingInt(RaidTargetKnowledge::knownChestCount))
-            .orElse(null);
+        return raidTargets.stream().max(Comparator.comparingInt(RaidTargetKnowledge::knownChestCount)).orElse(null);
     }
 
     public void rememberRaidTarget(RaidTargetKnowledge knowledge) {
@@ -81,6 +87,14 @@ public final class SurvivorMemory {
         return currentMode;
     }
 
+    public BlockPos homePosition() {
+        return homePosition;
+    }
+
+    public void setHomePosition(BlockPos homePosition) {
+        this.homePosition = homePosition.immutable();
+    }
+
     public List<BlockPos> dangerousBlocks() {
         return List.copyOf(dangerousBlocks);
     }
@@ -88,6 +102,28 @@ public final class SurvivorMemory {
     public void setDangerousBlocks(List<BlockPos> positions) {
         dangerousBlocks.clear();
         dangerousBlocks.addAll(positions);
+    }
+
+    public List<BlockPos> knownChests() {
+        return List.copyOf(knownChests);
+    }
+
+    public void setKnownChests(List<BlockPos> chests) {
+        knownChests.clear();
+        knownChests.addAll(chests);
+    }
+
+    public Map<UUID, Integer> relationMatrix() {
+        return Map.copyOf(relationMatrix);
+    }
+
+    public void setRelation(UUID targetId, int value) {
+        relationMatrix.put(targetId, value);
+    }
+
+    public void replaceRelations(Map<UUID, Integer> relations) {
+        relationMatrix.clear();
+        relationMatrix.putAll(relations);
     }
 
     public void refreshStaleKnowledge(MinecraftServer server, int revalidationSeconds) {

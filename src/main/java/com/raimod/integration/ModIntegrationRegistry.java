@@ -1,6 +1,7 @@
 package com.raimod.integration;
 
 import baritone.api.BaritoneAPI;
+import baritone.api.IBaritone;
 import baritone.api.pathing.goals.GoalBlock;
 import baritone.api.pathing.goals.GoalNear;
 import baritone.api.process.ICustomGoalProcess;
@@ -10,20 +11,28 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
 import net.minecraft.core.BlockPos;
+import net.minecraft.core.Direction;
+import net.minecraft.nbt.CompoundTag;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.TicketType;
 import net.minecraft.util.Mth;
+import net.minecraft.world.InteractionHand;
+import net.minecraft.world.InteractionResult;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.item.ItemStack;
+import net.minecraft.core.registries.BuiltInRegistries;
+import net.minecraft.world.level.ChunkPos;
+import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.phys.AABB;
+import net.minecraft.world.phys.BlockHitResult;
 import net.minecraft.world.phys.Vec3;
 import net.minecraft.world.phys.shapes.VoxelShape;
 import net.neoforged.fml.ModList;
 
 public final class ModIntegrationRegistry {
-    private static final TicketType<UUID> RAI_TICKET = TicketType.create("rai_survivor", UUID::compareTo, 300);
+    private static final TicketType<UUID> RAI_TICKET = TicketType.create("rai_survivor", UUID::compareTo, 200);
 
     private final BaritoneBridge baritone = new BaritoneBridge();
     private final TaczBridge tacz = new TaczBridge();
@@ -51,14 +60,11 @@ public final class ModIntegrationRegistry {
 
     public void applyChunkTickets(ServerLevel level, SimulatedSurvivor survivor, int configuredRadius) {
         int radius = level.getServer().getAverageTickTime() > 45.0f ? 1 : configuredRadius;
-        BlockPos center = survivor.fakePlayer().blockPosition();
+        BlockPos center = survivor.blockPosition();
         for (int x = -radius; x <= radius; x++) {
             for (int z = -radius; z <= radius; z++) {
-                BlockPos chunkCenter = center.offset(x * 16, 0, z * 16);
-                level.getChunkSource().addRegionTicket(RAI_TICKET,
-                    new net.minecraft.world.level.ChunkPos(chunkCenter),
-                    radius,
-                    survivor.id());
+                BlockPos p = center.offset(x * 16, 0, z * 16);
+                level.getChunkSource().addRegionTicket(RAI_TICKET, new ChunkPos(p), radius, survivor.id());
             }
         }
     }
@@ -66,7 +72,7 @@ public final class ModIntegrationRegistry {
     public void updateVisualDangerScan(ServerLevel level, SimulatedSurvivor survivor) {
         List<BlockPos> dangerous = securityCraft.scanMinesInFov(level, survivor);
         survivor.memory().setDangerousBlocks(dangerous);
-        baritone.updateAvoidBlocks(dangerous);
+        baritone.updateAvoidBlocks(survivor, dangerous);
     }
 
     public BaritoneBridge baritone() {
@@ -109,82 +115,69 @@ public final class ModIntegrationRegistry {
     }
 
     public static final class BaritoneBridge extends BaseBridge {
-        private List<BlockPos> avoidBlocks = List.of();
+        public IBaritone getFor(SimulatedSurvivor survivor) {
+            return BaritoneAPI.getProvider().getBaritoneForEntity(survivor);
+        }
 
-        public void setLootChestGoal(BlockPos chestPos) {
+        public void setLootChestGoal(SimulatedSurvivor survivor, BlockPos chestPos) {
             if (!isEnabled()) {
                 return;
             }
-            ICustomGoalProcess process = BaritoneAPI.getProvider().getPrimaryBaritone().getCustomGoalProcess();
+            ICustomGoalProcess process = getFor(survivor).getCustomGoalProcess();
             process.setGoalAndPath(new GoalBlock(chestPos));
         }
 
-        public void setRaidHouseGoal(BlockPos housePos) {
+        public void setRaidHouseGoal(SimulatedSurvivor survivor, BlockPos housePos) {
             if (!isEnabled()) {
                 return;
             }
-            ICustomGoalProcess process = BaritoneAPI.getProvider().getPrimaryBaritone().getCustomGoalProcess();
+            ICustomGoalProcess process = getFor(survivor).getCustomGoalProcess();
             process.setGoalAndPath(new GoalNear(housePos, 2));
         }
 
-        public void setRetreatGoal(BlockPos retreatPos) {
+        public void setRetreatGoal(SimulatedSurvivor survivor, BlockPos retreatPos) {
             if (!isEnabled()) {
                 return;
             }
-            ICustomGoalProcess process = BaritoneAPI.getProvider().getPrimaryBaritone().getCustomGoalProcess();
+            ICustomGoalProcess process = getFor(survivor).getCustomGoalProcess();
             process.setGoalAndPath(new GoalNear(retreatPos, 1));
         }
 
-        public void updateAvoidBlocks(List<BlockPos> avoidBlocks) {
-            this.avoidBlocks = List.copyOf(avoidBlocks);
+        public void updateAvoidBlocks(SimulatedSurvivor survivor, List<BlockPos> avoidBlocks) {
             if (!isEnabled()) {
                 return;
             }
-            // Assumed Baritone 1.21 API: treat each mine as an avoid center with a 1-block radius.
-            // If your exact API differs, map avoidBlocks to the mod's avoid list equivalent.
+            IBaritone baritone = getFor(survivor);
+            baritone.getPathingBehavior().cancelEverything();
             BaritoneAPI.getSettings().allowParkour.value = false;
             BaritoneAPI.getSettings().avoidance.value = true;
-        }
-
-        public List<BlockPos> avoidBlocks() {
-            return avoidBlocks;
+            // API versions differ for direct avoid-list injection; this is set on a per-bot baritone instance.
         }
     }
 
     public static final class TaczBridge extends BaseBridge {
-        public Vec3 calculateLeadShot(Entity target, ItemStack gun, double baseScatterDegrees, float accuracySkill) {
+        public Vec3 calculateLeadShot(Entity shooter, Entity target, ItemStack gun, double baseScatterDegrees, float accuracySkill) {
+            Vec3 shooterEye = shooter.getEyePosition();
             Vec3 targetPos = target.position().add(0.0, target.getBbHeight() * 0.65, 0.0);
             Vec3 targetVel = target.getDeltaMovement();
-            double distance = target.distanceToSqr(targetPos);
-            distance = Math.sqrt(distance);
+            double distance = shooterEye.distanceTo(targetPos);
 
-            // Assumed TacZ API: bullet speed and gravity from gun data.
-            double bulletSpeed = readTaczBulletSpeed(gun);
-            double gravity = readTaczGravity(gun);
-            double travelTime = distance / Math.max(1.0, bulletSpeed);
+            TaczBulletData bulletData = TaczHelper.getBulletData(gun);
+            double travelTime = distance / Math.max(1.0, bulletData.velocity());
 
-            // P_aim = P_target + (V_target * (Distance / V_bullet))
             Vec3 lead = targetPos.add(targetVel.scale(travelTime));
-
-            double drop = 0.5 * gravity * travelTime * travelTime;
+            double drop = 0.5 * bulletData.gravity() * travelTime * travelTime;
             Vec3 compensated = lead.add(0.0, drop, 0.0);
 
             double skillFactor = Mth.clamp(accuracySkill, 0.0f, 1.0f);
-            double scatterDeg = baseScatterDegrees * (1.1 - skillFactor);
+            double scatterDeg = baseScatterDegrees * (1.15 - skillFactor);
             double scatterRad = Math.toRadians(scatterDeg);
-            double randYaw = (Math.random() - 0.5) * scatterRad;
-            double randPitch = (Math.random() - 0.5) * scatterRad;
-            Vec3 forward = compensated.subtract(targetPos).normalize();
-            Vec3 scattered = forward.xRot((float) randPitch).yRot((float) randYaw);
-            return targetPos.add(scattered.scale(distance));
-        }
+            double yawScatter = (Math.random() - 0.5) * scatterRad;
+            double pitchScatter = (Math.random() - 0.5) * scatterRad;
 
-        private double readTaczBulletSpeed(ItemStack gun) {
-            return 160.0;
-        }
-
-        private double readTaczGravity(ItemStack gun) {
-            return 0.05;
+            Vec3 direction = compensated.subtract(shooterEye).normalize();
+            Vec3 finalDir = direction.xRot((float) pitchScatter).yRot((float) yawScatter);
+            return shooterEye.add(finalDir.scale(distance));
         }
 
         public void prepareRaidLoadout(UUID survivorId, double threat) {
@@ -194,19 +187,79 @@ public final class ModIntegrationRegistry {
         }
     }
 
+    public record TaczBulletData(double velocity, double gravity) {
+    }
+
+    public static final class TaczHelper {
+        private TaczHelper() {
+        }
+
+        public static TaczBulletData getBulletData(ItemStack gun) {
+            CompoundTag tag = gun.getTag();
+            if (tag == null) {
+                return new TaczBulletData(90.0, 0.05);
+            }
+
+            double velocity = firstNumeric(tag, "AmmoSpeed", "Velocity", "BulletSpeed", "MuzzleVelocity");
+            double gravity = firstNumeric(tag, "Gravity", "BulletGravity", "ProjectileGravity");
+            if (velocity <= 0) {
+                velocity = 90.0;
+            }
+            if (gravity <= 0) {
+                gravity = 0.05;
+            }
+
+            // If TacZ API is present in your environment, replace with direct call:
+            // IGun.getGunData(gun).getBulletVelocity(), IGun.getGunData(gun).getGravity()
+            return new TaczBulletData(velocity, gravity);
+        }
+
+        private static double firstNumeric(CompoundTag tag, String... keys) {
+            for (String key : keys) {
+                if (tag.contains(key)) {
+                    return tag.getDouble(key);
+                }
+            }
+            for (String key : tag.getAllKeys()) {
+                CompoundTag nested = tag.getCompound(key);
+                if (!nested.isEmpty()) {
+                    double value = firstNumeric(nested, keys);
+                    if (value > 0) {
+                        return value;
+                    }
+                }
+            }
+            return -1;
+        }
+    }
+
     public static final class CorpseBridge extends BaseBridge {
         public boolean hasUnrecoveredCorpse(UUID survivorId) {
             return isEnabled();
         }
 
-        public boolean recoverGradually(SimulatedSurvivor survivor, int minTicks, int maxTicks) {
+        public boolean transferOneItem(SimulatedSurvivor survivor, net.minecraft.world.Container source, int minTicks, int maxTicks) {
             SurvivorState state = survivor.state();
             if (state.interactionCooldownTicks() > 0) {
                 return false;
             }
-            int nextDelay = minTicks + (int) (Math.random() * ((maxTicks - minTicks) + 1));
-            survivor.setState(state.withInteractionCooldown(nextDelay));
-            return isEnabled();
+
+            for (int slot = 0; slot < source.getContainerSize(); slot++) {
+                ItemStack stack = source.getItem(slot);
+                if (!stack.isEmpty()) {
+                    ItemStack one = stack.split(1);
+                    boolean accepted = survivor.getInventory().add(one);
+                    if (!accepted) {
+                        stack.grow(1);
+                        return false;
+                    }
+                    source.setChanged();
+                    int delay = minTicks + survivor.level().random.nextInt((maxTicks - minTicks) + 1);
+                    survivor.setState(state.withInteractionCooldown(delay));
+                    return true;
+                }
+            }
+            return false;
         }
     }
 
@@ -230,10 +283,10 @@ public final class ModIntegrationRegistry {
                 return List.of();
             }
 
-            Vec3 eye = survivor.fakePlayer().getEyePosition();
-            Vec3 look = survivor.fakePlayer().getLookAngle().normalize();
+            Vec3 eye = survivor.getEyePosition();
+            Vec3 look = survivor.getLookAngle().normalize();
             List<BlockPos> matches = new ArrayList<>();
-            AABB scan = new AABB(eye.x - 32, eye.y - 8, eye.z - 32, eye.x + 32, eye.y + 8, eye.z + 32);
+            AABB scan = new AABB(eye.x - 28, eye.y - 8, eye.z - 28, eye.x + 28, eye.y + 8, eye.z + 28);
             int minX = Mth.floor(scan.minX);
             int minY = Mth.floor(scan.minY);
             int minZ = Mth.floor(scan.minZ);
@@ -245,19 +298,14 @@ public final class ModIntegrationRegistry {
                 for (int y = minY; y <= maxY; y++) {
                     for (int z = minZ; z <= maxZ; z++) {
                         BlockPos pos = new BlockPos(x, y, z);
-                        Vec3 to = Vec3.atCenterOf(pos).subtract(eye);
-                        if (to.lengthSqr() < 0.0001) {
+                        Vec3 dir = Vec3.atCenterOf(pos).subtract(eye).normalize();
+                        if (look.dot(dir) < 0.5) {
                             continue;
                         }
 
-                        Vec3 dir = to.normalize();
-                        double dot = look.dot(dir);
-                        if (dot < 0.5) {
-                            continue;
-                        }
-
-                        if (level.getBlockState(pos).getBlock().builtInRegistryHolder().key().location().equals(CONTACT_MINE)) {
-                            VoxelShape shape = level.getBlockState(pos).getCollisionShape(level, pos);
+                        BlockState state = level.getBlockState(pos);
+                        if (state.getBlock().builtInRegistryHolder().key().location().equals(CONTACT_MINE)) {
+                            VoxelShape shape = state.getCollisionShape(level, pos);
                             if (!shape.isEmpty()) {
                                 matches.add(pos.immutable());
                             }
@@ -265,7 +313,6 @@ public final class ModIntegrationRegistry {
                     }
                 }
             }
-
             return matches;
         }
     }
@@ -278,10 +325,29 @@ public final class ModIntegrationRegistry {
         }
 
         public float getAccuracySkill(UUID survivorId) {
-            if (!isEnabled()) {
-                return 0.35f;
-            }
-            return 0.7f;
+            return isEnabled() ? 0.70f : 0.35f;
         }
+    }
+
+    public boolean placeExplosive(SimulatedSurvivor survivor, BlockPos wallPos) {
+        ItemStack explosive = findExplosive(survivor);
+        if (explosive.isEmpty()) {
+            return false;
+        }
+
+        BlockHitResult hitResult = new BlockHitResult(Vec3.atCenterOf(wallPos), Direction.UP, wallPos, false);
+        InteractionResult result = survivor.gameMode.useItemOn(survivor, survivor.serverLevel(), explosive, InteractionHand.MAIN_HAND, hitResult);
+        return result.consumesAction();
+    }
+
+    private ItemStack findExplosive(SimulatedSurvivor survivor) {
+        for (int i = 0; i < survivor.getInventory().getContainerSize(); i++) {
+            ItemStack stack = survivor.getInventory().getItem(i);
+            String id = BuiltInRegistries.ITEM.getKey(stack.getItem()).toString();
+            if (id.contains("tnt") || id.contains("explosive") || id.contains("breach")) {
+                return stack;
+            }
+        }
+        return ItemStack.EMPTY;
     }
 }

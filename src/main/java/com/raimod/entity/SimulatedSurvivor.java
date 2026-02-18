@@ -8,49 +8,42 @@ import com.raimod.config.RAIServerConfig;
 import com.raimod.integration.ModIntegrationRegistry;
 import java.util.Objects;
 import java.util.UUID;
-import net.minecraft.core.BlockPos;
-import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
-import net.minecraft.world.entity.MobType;
+import net.minecraft.server.level.ServerPlayer;
+import net.minecraft.world.entity.EntityType;
 import net.minecraft.world.entity.PathfinderMob;
 import net.minecraft.world.entity.ai.control.JumpControl;
 import net.minecraft.world.entity.ai.control.LookControl;
 import net.minecraft.world.entity.ai.navigation.GroundPathNavigation;
-import net.minecraft.world.entity.player.Player;
-import net.minecraft.world.level.Level;
 import net.minecraft.world.level.pathfinder.PathType;
 import net.neoforged.neoforge.common.util.FakePlayer;
-import net.neoforged.neoforge.common.util.FakePlayerFactory;
 
-public final class SimulatedSurvivor {
-    private final UUID id;
+public final class SimulatedSurvivor extends FakePlayer {
+    private final UUID survivorId;
     private final SurvivorMemory memory;
     private final BehaviorEngine behaviorEngine;
-    private final FakePlayer fakePlayer;
-    private final SurvivorBody body;
+    private final ControlDelegate controlDelegate;
     private SurvivorState state;
+    private ModIntegrationRegistry integrations;
+    private RAIServerConfig.RuntimeValues runtime;
 
-    private SimulatedSurvivor(UUID id, SurvivorMemory memory, BehaviorEngine behaviorEngine, FakePlayer fakePlayer,
-                              SurvivorBody body, SurvivorState state) {
-        this.id = id;
-        this.memory = memory;
-        this.behaviorEngine = behaviorEngine;
-        this.fakePlayer = fakePlayer;
-        this.body = body;
-        this.state = state;
+    public SimulatedSurvivor(ServerLevel level, GameProfile profile, RAIServerConfig.RuntimeValues config) {
+        super(level, profile);
+        this.survivorId = profile.getId();
+        this.memory = SurvivorMemory.createEmpty(profile.getId());
+        this.behaviorEngine = new BehaviorEngine();
+        this.state = SurvivorState.freshSpawn(config.minActiveChunks(), config.maxActiveChunks());
+        this.runtime = config;
+        this.controlDelegate = new ControlDelegate(level, this);
     }
 
     public static SimulatedSurvivor bootstrap(UUID id, RAIServerConfig.RuntimeValues config, ServerLevel level) {
-        SurvivorMemory memory = SurvivorMemory.createEmpty(id);
-        SurvivorState state = SurvivorState.freshSpawn(config.minActiveChunks(), config.maxActiveChunks());
         GameProfile profile = new GameProfile(id, "rai_" + id.toString().substring(0, 8));
-        FakePlayer fakePlayer = FakePlayerFactory.get(level, profile);
-        SurvivorBody body = new SurvivorBody(level, fakePlayer.blockPosition());
-        return new SimulatedSurvivor(id, memory, new BehaviorEngine(), fakePlayer, body, state);
+        return new SimulatedSurvivor(level, profile, config);
     }
 
     public UUID id() {
-        return id;
+        return survivorId;
     }
 
     public SurvivorMemory memory() {
@@ -61,67 +54,81 @@ public final class SimulatedSurvivor {
         return state;
     }
 
-    public FakePlayer fakePlayer() {
-        return fakePlayer;
+    public void setState(SurvivorState newState) {
+        this.state = Objects.requireNonNull(newState);
     }
 
-    public SurvivorBody body() {
-        return body;
+    public void configureRuntime(ModIntegrationRegistry integrations, RAIServerConfig.RuntimeValues runtime) {
+        this.integrations = integrations;
+        this.runtime = runtime;
     }
 
-    public void tick(MinecraftServer server, ModIntegrationRegistry integrations, RAIServerConfig.RuntimeValues config) {
-        state = state.withDynamicChunkBudget(config, server);
+    @Override
+    public void tick() {
+        super.tick();
 
-        if (fakePlayer.level() instanceof ServerLevel serverLevel) {
-            body.syncFromFakePlayer(fakePlayer);
-            integrations.applyChunkTickets(serverLevel, this, state.loadedChunks());
-            integrations.updateVisualDangerScan(serverLevel, this);
+        if (this.server == null || integrations == null || runtime == null) {
+            return;
         }
 
-        SurvivorContext context = new SurvivorContext(server, this, integrations, config);
+        state = state.withDynamicChunkBudget(this.server, runtime);
+        controlDelegate.syncWithPlayer(this);
+
+        integrations.applyChunkTickets(serverLevel(), this, state.loadedChunks());
+        integrations.updateVisualDangerScan(serverLevel(), this);
+
+        SurvivorContext context = new SurvivorContext(this.server, this, integrations, runtime);
         behaviorEngine.tick(context);
     }
 
     public void resetRuntime(RAIServerConfig.RuntimeValues config) {
         this.state = state.withResetBudgets(config.minActiveChunks(), config.maxActiveChunks());
+        this.runtime = config;
     }
 
-    public void setState(SurvivorState newState) {
-        this.state = Objects.requireNonNull(newState);
+    public LookControl getLookControl() {
+        return controlDelegate.lookControl();
     }
 
-    public static final class SurvivorBody extends PathfinderMob {
-        private final SmoothLookControl smoothLookControl;
-        private final BotJumpControl botJumpControl;
+    public GroundPathNavigation getNavigationDelegate() {
+        return controlDelegate.navigation();
+    }
 
-        public SurvivorBody(Level level, BlockPos startPos) {
-            super(net.minecraft.world.entity.EntityType.ZOMBIE, level);
-            this.setPos(startPos.getX() + 0.5, startPos.getY(), startPos.getZ() + 0.5);
-            this.smoothLookControl = new SmoothLookControl(this);
-            this.botJumpControl = new BotJumpControl(this);
-            this.lookControl = smoothLookControl;
-            this.jumpControl = botJumpControl;
+    public JumpControl getJumpControlDelegate() {
+        return controlDelegate.jumpControl();
+    }
+
+    private static final class ControlDelegate extends PathfinderMob {
+        private final LookControl lookControl;
+        private final JumpControl jumpControl;
+        private final GroundPathNavigation navigation;
+
+        private ControlDelegate(ServerLevel level, ServerPlayer anchor) {
+            super(EntityType.ZOMBIE, level);
+            this.setPos(anchor.getX(), anchor.getY(), anchor.getZ());
+            this.lookControl = new SmoothLookControl(this);
+            this.jumpControl = new JumpControl(this);
             this.navigation = new GroundPathNavigation(this, level);
-            this.setPathfindingMalus(PathType.WATER, 16.0F);
+            this.setPathfindingMalus(PathType.WATER, 8.0F);
         }
 
-        public void syncFromFakePlayer(Player fakePlayer) {
-            this.setPos(fakePlayer.getX(), fakePlayer.getY(), fakePlayer.getZ());
-            this.setYRot(fakePlayer.getYRot());
-            this.setXRot(fakePlayer.getXRot());
+        public void syncWithPlayer(ServerPlayer player) {
+            this.setPos(player.getX(), player.getY(), player.getZ());
+            this.setYRot(player.getYRot());
+            this.setXRot(player.getXRot());
+            this.lookControl.tick();
         }
 
-        public SmoothLookControl smoothLookControl() {
-            return smoothLookControl;
+        public LookControl lookControl() {
+            return lookControl;
         }
 
-        public BotJumpControl botJumpControl() {
-            return botJumpControl;
+        public JumpControl jumpControl() {
+            return jumpControl;
         }
 
-        @Override
-        public MobType getMobType() {
-            return MobType.UNDEFINED;
+        public GroundPathNavigation navigation() {
+            return navigation;
         }
 
         @Override
@@ -129,20 +136,14 @@ public final class SimulatedSurvivor {
         }
     }
 
-    public static final class SmoothLookControl extends LookControl {
-        public SmoothLookControl(PathfinderMob mob) {
+    private static final class SmoothLookControl extends LookControl {
+        private SmoothLookControl(PathfinderMob mob) {
             super(mob);
         }
 
         @Override
         protected float rotateTowards(float current, float target, float maxDelta) {
-            return super.rotateTowards(current, target, Math.min(maxDelta, 4.0F));
-        }
-    }
-
-    public static final class BotJumpControl extends JumpControl {
-        public BotJumpControl(PathfinderMob mob) {
-            super(mob);
+            return super.rotateTowards(current, target, Math.min(maxDelta, 3.0F));
         }
     }
 }

@@ -16,7 +16,7 @@ public record SurvivorState(
         return new SurvivorState(minChunks, minChunks, maxChunks, TacticalMode.SCOUTING, -1, false, 0);
     }
 
-    public SurvivorState withDynamicChunkBudget(RAIServerConfig.RuntimeValues config, MinecraftServer server) {
+    public SurvivorState withDynamicChunkBudget(MinecraftServer server, RAIServerConfig.RuntimeValues config) {
         int targetChunks = minChunks;
         if (config.dynamicChunkBudget()) {
             float avgTickMs = server.getAverageTickTime();
