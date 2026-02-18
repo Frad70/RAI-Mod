@@ -14,11 +14,13 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.UUID;
 import net.minecraft.core.BlockPos;
+import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.network.chat.Component;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.util.Mth;
+import net.minecraft.world.InteractionHand;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.entity.item.ItemEntity;
@@ -36,6 +38,7 @@ public final class SimulatedSurvivor extends FakePlayer {
     private final BehaviorEngine behaviorEngine;
     private final float trustFactor;
     private final Map<UUID, Integer> recentDamageByEntityTick;
+    private final Map<UUID, Integer> observedStaticTicks;
 
     private SurvivorState state;
     private ModIntegrationRegistry integrations;
@@ -50,6 +53,12 @@ public final class SimulatedSurvivor extends FakePlayer {
     private int inventoryActionCooldown;
     private int lastInteractedSlot;
     private int burstTicks;
+    private int spyglassCooldown;
+    private int fakeSurrenderCooldown;
+
+    private UUID stalkTargetId;
+    private int stalkObservedTicks;
+    private int stalkShockDelayTicks;
 
     public SimulatedSurvivor(ServerLevel level, GameProfile profile, RAIServerConfig.RuntimeValues config) {
         super(level, profile);
@@ -61,6 +70,7 @@ public final class SimulatedSurvivor extends FakePlayer {
         this.lookTarget = this.getEyePosition().add(this.getLookAngle().scale(3.0));
         this.trustFactor = level.random.nextFloat();
         this.recentDamageByEntityTick = new HashMap<>();
+        this.observedStaticTicks = new HashMap<>();
         this.lastInteractedSlot = -1;
     }
 
@@ -155,6 +165,12 @@ public final class SimulatedSurvivor extends FakePlayer {
         if (inventoryActionCooldown > 0) {
             inventoryActionCooldown--;
         }
+        if (spyglassCooldown > 0) {
+            spyglassCooldown--;
+        }
+        if (fakeSurrenderCooldown > 0) {
+            fakeSurrenderCooldown--;
+        }
 
         Entity lastHurt = this.getLastHurtByMob();
         if (lastHurt != null) {
@@ -172,6 +188,7 @@ public final class SimulatedSurvivor extends FakePlayer {
         evaluateTerritorialDefense();
         updateSquadContext();
         handleSquadLogistics();
+        runPsychologicalWarfare();
         applyWeaponMastery();
 
         SurvivorContext context = new SurvivorContext(this.server, this, integrations, runtime);
@@ -179,6 +196,48 @@ public final class SimulatedSurvivor extends FakePlayer {
 
         updateRotationFromLookTarget();
         applyManualMovement();
+    }
+
+    private void runPsychologicalWarfare() {
+        List<ServerPlayer> players = this.serverLevel().getPlayers(player -> player.distanceTo(this) < 140.0);
+        for (ServerPlayer player : players) {
+            boolean isStatic = player.getDeltaMovement().horizontalDistanceSqr() < 0.0004;
+            int ticks = observedStaticTicks.getOrDefault(player.getUUID(), 0);
+            ticks = isStatic ? ticks + 1 : 0;
+            observedStaticTicks.put(player.getUUID(), ticks);
+
+            if (ticks > 600 && ticks % 120 == 0) {
+                CHAT.sendAfkCheck(this, player.getName().getString());
+            }
+
+            if (this.distanceTo(player) > 80.0f && hasSpyglass() && spyglassCooldown <= 0) {
+                useSpyglass();
+                Vec3 targetLook = player.getLookAngle().normalize();
+                Vec3 toMe = this.getEyePosition().subtract(player.getEyePosition()).normalize();
+                if (targetLook.dot(toMe) > 0.65) {
+                    CHAT.sendSpyglassLine(this, player.getName().getString());
+                }
+                spyglassCooldown = 120;
+            }
+        }
+
+        if (this.getHealth() < this.getMaxHealth() * 0.2f
+            && GroupManager.instance().onlineSquadmates(this).size() >= 1
+            && fakeSurrenderCooldown <= 0
+            && this.level().random.nextDouble() < 0.10) {
+            performFakeSurrender();
+            fakeSurrenderCooldown = 20 * 25;
+        }
+    }
+
+    private void performFakeSurrender() {
+        int junkSlot = findLowValueSlot();
+        if (junkSlot >= 0 && canPerformActions()) {
+            dropSlotWithLatency(junkSlot);
+        }
+        this.setShiftKeyDown(true);
+        CHAT.sendFakeSurrender(this);
+        integrations.voiceChat().broadcastSquadPing(this.id(), "fake_surrender_flank");
     }
 
     private void evaluateTerritorialDefense() {
@@ -299,6 +358,137 @@ public final class SimulatedSurvivor extends FakePlayer {
         this.level().addFreshEntity(dropped);
     }
 
+    public void beginStalk(UUID targetId) {
+        if (!targetId.equals(stalkTargetId)) {
+            stalkObservedTicks = 0;
+        }
+        stalkTargetId = targetId;
+        setState(state.withMode(SurvivorState.TacticalMode.STALK));
+    }
+
+    public void clearStalk() {
+        stalkTargetId = null;
+        stalkObservedTicks = 0;
+        stalkShockDelayTicks = 0;
+        if (state.tacticalMode() == SurvivorState.TacticalMode.STALK) {
+            setState(state.withMode(SurvivorState.TacticalMode.COMBAT_REACTION));
+        }
+        setShiftKeyDown(false);
+    }
+
+    public boolean performStalkBehavior(LivingEntity target) {
+        if (target == null || !target.isAlive()) {
+            clearStalk();
+            return false;
+        }
+
+        beginStalk(target.getUUID());
+        equipHighDamagePerShotWeapon();
+
+        Vec3 toTarget = target.position().subtract(this.position());
+        double distance = toTarget.horizontalDistance();
+
+        this.setShiftKeyDown(true);
+        if (distance < 6.0) {
+            setMovementInput(0.25, -0.2);
+        } else if (distance > 10.0) {
+            setMovementInput(0.12, 0.24);
+        } else {
+            setMovementInput(Math.sin(this.tickCount * 0.2) * 0.1, 0.0);
+        }
+
+        Vec3 targetToSelf = this.getEyePosition().subtract(target.getEyePosition()).normalize();
+        double facingDot = target.getLookAngle().normalize().dot(targetToSelf);
+        if (facingDot > 0.0) {
+            stalkShockDelayTicks++;
+            if (stalkShockDelayTicks < 10) {
+                clearMovementInput();
+                return true;
+            }
+            boolean shootNow = this.level().random.nextBoolean();
+            if (shootNow) {
+                this.aimAt(target.getEyePosition());
+                setState(state.withMode(SurvivorState.TacticalMode.COMBAT_REACTION).withReactionFireTicks(20));
+                setMovementInput(0.4, 0.15);
+            } else {
+                this.setShiftKeyDown(true);
+                this.swing(InteractionHand.MAIN_HAND);
+                CHAT.sendSocialBait(this, target.getName().getString());
+                clearMovementInput();
+            }
+            clearStalk();
+            return true;
+        }
+
+        this.aimAt(target.getEyePosition());
+        return true;
+    }
+
+    private void equipHighDamagePerShotWeapon() {
+        int bestSlot = -1;
+        int bestScore = Integer.MIN_VALUE;
+        for (int i = 0; i < this.getInventory().getContainerSize(); i++) {
+            ItemStack stack = this.getInventory().getItem(i);
+            if (stack.isEmpty()) {
+                continue;
+            }
+            String id = BuiltInRegistries.ITEM.getKey(stack.getItem()).toString().toLowerCase();
+            int score = 0;
+            if (id.contains("shotgun")) {
+                score += 80;
+            }
+            if (id.contains("sniper") || id.contains("50cal") || id.contains("magnum")) {
+                score += 100;
+            }
+            if (id.contains("rifle")) {
+                score += 30;
+            }
+            if (score > bestScore) {
+                bestScore = score;
+                bestSlot = i;
+            }
+        }
+        if (bestSlot >= 0) {
+            swapSelectedSlotWithLatency(bestSlot);
+        }
+    }
+
+    private boolean hasSpyglass() {
+        for (int i = 0; i < this.getInventory().getContainerSize(); i++) {
+            String id = BuiltInRegistries.ITEM.getKey(this.getInventory().getItem(i).getItem()).toString().toLowerCase();
+            if (id.contains("spyglass")) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private void useSpyglass() {
+        for (int i = 0; i < this.getInventory().getContainerSize(); i++) {
+            ItemStack stack = this.getInventory().getItem(i);
+            String id = BuiltInRegistries.ITEM.getKey(stack.getItem()).toString().toLowerCase();
+            if (id.contains("spyglass") && canPerformActions()) {
+                swapSelectedSlotWithLatency(i);
+                this.startUsingItem(InteractionHand.MAIN_HAND);
+                return;
+            }
+        }
+    }
+
+    private int findLowValueSlot() {
+        for (int i = 0; i < this.getInventory().getContainerSize(); i++) {
+            ItemStack stack = this.getInventory().getItem(i);
+            if (stack.isEmpty()) {
+                continue;
+            }
+            String id = BuiltInRegistries.ITEM.getKey(stack.getItem()).toString().toLowerCase();
+            if (id.contains("dirt") || id.contains("cobblestone") || id.contains("rotten_flesh")) {
+                return i;
+            }
+        }
+        return -1;
+    }
+
     private void applyWeaponMastery() {
         ItemStack gun = this.getMainHandItem();
         if (gun.isEmpty()) {
@@ -416,7 +606,7 @@ public final class SimulatedSurvivor extends FakePlayer {
 
     private int findMedkitSlot() {
         for (int i = 0; i < this.getInventory().getContainerSize(); i++) {
-            String id = net.minecraft.core.registries.BuiltInRegistries.ITEM.getKey(this.getInventory().getItem(i).getItem()).toString().toLowerCase();
+            String id = BuiltInRegistries.ITEM.getKey(this.getInventory().getItem(i).getItem()).toString().toLowerCase();
             if (id.contains("medkit") || id.contains("bandage") || id.contains("med")) {
                 return i;
             }
@@ -432,7 +622,7 @@ public final class SimulatedSurvivor extends FakePlayer {
             if (stack.isEmpty()) {
                 continue;
             }
-            String id = net.minecraft.core.registries.BuiltInRegistries.ITEM.getKey(stack.getItem()).toString().toLowerCase();
+            String id = BuiltInRegistries.ITEM.getKey(stack.getItem()).toString().toLowerCase();
             if (!id.contains("ammo")) {
                 continue;
             }
@@ -588,6 +778,9 @@ public final class SimulatedSurvivor extends FakePlayer {
         double speed = this.isSprinting() ? 0.23 : 0.17;
         if (GroupManager.instance().roleOf(this.id()) == GroupManager.Role.SUPPORT) {
             speed *= 0.93;
+        }
+        if (state.tacticalMode() == SurvivorState.TacticalMode.STALK) {
+            speed *= 0.65;
         }
         Vec3 next = this.getDeltaMovement().scale(0.35).add(motion.scale(speed));
         this.setDeltaMovement(next.x, this.getDeltaMovement().y, next.z);

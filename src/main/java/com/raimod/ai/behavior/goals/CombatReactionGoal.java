@@ -3,6 +3,7 @@ package com.raimod.ai.behavior.goals;
 import com.raimod.ai.behavior.SurvivorContext;
 import com.raimod.entity.SimulatedSurvivor;
 import com.raimod.entity.SurvivorState;
+import com.raimod.integration.SurvivorChatBridge;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashMap;
@@ -18,6 +19,8 @@ import net.minecraft.world.phys.Vec3;
 
 public final class CombatReactionGoal implements Goal {
     private final Map<UUID, Integer> lostSightTicks = new HashMap<>();
+    private final Map<String, Integer> stalkOpportunityTicks = new HashMap<>();
+    private final SurvivorChatBridge chat = new SurvivorChatBridge();
 
     @Override
     public double score(SurvivorContext context) {
@@ -39,16 +42,24 @@ public final class CombatReactionGoal implements Goal {
         LivingEntity target = getPriorityTarget(context);
         if (target == null) {
             survivor.clearMovementInput();
+            survivor.clearStalk();
             return;
         }
 
         LivingEntity betrayalTarget = maybePickBetrayalTarget(context, target);
         if (betrayalTarget != null) {
             target = betrayalTarget;
+            chat.sendBetrayalLine(survivor);
         }
 
         survivor.setCurrentCombatTarget(target.getUUID());
         UUID botId = survivor.id();
+
+        if (shouldEnterStalkMode(survivor, target)) {
+            if (survivor.performStalkBehavior(target)) {
+                return;
+            }
+        }
 
         if (!survivor.isEntityVisible(target)) {
             int lost = lostSightTicks.getOrDefault(botId, 0) + 1;
@@ -116,6 +127,28 @@ public final class CombatReactionGoal implements Goal {
         if (survivor.state().reactionFireTicks() <= 0) {
             survivor.clearMovementInput();
         }
+    }
+
+    private boolean shouldEnterStalkMode(SimulatedSurvivor survivor, LivingEntity target) {
+        if (target == null || !target.isAlive()) {
+            return false;
+        }
+        if (target.getDeltaMovement().horizontalDistanceSqr() < 0.0004) {
+            return false;
+        }
+
+        Vec3 toSurvivor = survivor.getEyePosition().subtract(target.getEyePosition()).normalize();
+        double dot = target.getLookAngle().normalize().dot(toSurvivor);
+        String key = survivor.id() + ":" + target.getUUID();
+
+        if (dot < -0.2) {
+            int ticks = stalkOpportunityTicks.getOrDefault(key, 0) + 1;
+            stalkOpportunityTicks.put(key, ticks);
+            return ticks > 150;
+        }
+
+        stalkOpportunityTicks.put(key, 0);
+        return false;
     }
 
     private LivingEntity getPriorityTarget(SurvivorContext context) {

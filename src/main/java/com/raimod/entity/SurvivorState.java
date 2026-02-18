@@ -70,6 +70,7 @@ public record SurvivorState(
         BASE_DEFENSE,
         DEFEND_HOME,
         COMBAT_REACTION,
+        STALK,
         SEARCHING,
         RELOAD,
         HEALING,
