@@ -11,6 +11,8 @@ public final class RAIServerConfig {
     public static final ModConfigSpec.BooleanValue ENABLE_DYNAMIC_CHUNK_BUDGET;
     public static final ModConfigSpec.BooleanValue ENABLE_SERVER_SOUND_AWARENESS;
     public static final ModConfigSpec.IntValue MEMORY_REVALIDATION_SECONDS;
+    public static final ModConfigSpec.DoubleValue BASE_AIM_SCATTER_DEGREES;
+    public static final ModConfigSpec.DoubleValue RAID_THRESHOLD;
 
     static {
         ModConfigSpec.Builder builder = new ModConfigSpec.Builder();
@@ -42,6 +44,18 @@ public final class RAIServerConfig {
             .defineInRange("memoryRevalidationSeconds", 240, 30, 3600);
         builder.pop();
 
+        builder.push("combat");
+        BASE_AIM_SCATTER_DEGREES = builder
+            .comment("Base human-like scatter in degrees before physical stats correction")
+            .defineInRange("baseAimScatterDegrees", 2.2d, 0.0d, 15.0d);
+        builder.pop();
+
+        builder.push("raiding");
+        RAID_THRESHOLD = builder
+            .comment("Minimum utility score required to start raid sequence")
+            .defineInRange("raidThreshold", 120.0d, 1.0d, 5000.0d);
+        builder.pop();
+
         SPEC = builder.build();
     }
 
@@ -57,7 +71,9 @@ public final class RAIServerConfig {
             max,
             ENABLE_DYNAMIC_CHUNK_BUDGET.get(),
             ENABLE_SERVER_SOUND_AWARENESS.get(),
-            MEMORY_REVALIDATION_SECONDS.get()
+            MEMORY_REVALIDATION_SECONDS.get(),
+            BASE_AIM_SCATTER_DEGREES.get(),
+            RAID_THRESHOLD.get()
         );
     }
 
@@ -67,7 +83,9 @@ public final class RAIServerConfig {
         int maxActiveChunks,
         boolean dynamicChunkBudget,
         boolean soundAwareness,
-        int memoryRevalidationSeconds
+        int memoryRevalidationSeconds,
+        double baseAimScatterDegrees,
+        double raidThreshold
     ) {
     }
 }

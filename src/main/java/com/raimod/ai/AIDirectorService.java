@@ -20,6 +20,7 @@ public final class AIDirectorService {
     private final ModIntegrationRegistry integrationRegistry;
     private RAIServerConfig.RuntimeValues config;
     private boolean initialized;
+    private int saveTimer;
 
     public AIDirectorService() {
         this.persistence = new SurvivorPersistence();
@@ -41,6 +42,12 @@ public final class AIDirectorService {
         if (all.size() < config.maxPlayers()) {
             spawnMissingSurvivors(server, config.maxPlayers() - all.size());
         }
+
+        saveTimer++;
+        if (saveTimer >= 100) {
+            persistence.saveAll(server.overworld());
+            saveTimer = 0;
+        }
     }
 
     public void onConfigReloaded(ModConfigEvent.Reloading event) {
@@ -61,7 +68,7 @@ public final class AIDirectorService {
     private void initialize(MinecraftServer server) {
         integrationRegistry.bootstrap(server);
 
-        List<SimulatedSurvivor> restored = persistence.restore(server.overworld());
+        List<SimulatedSurvivor> restored = persistence.restore(server.overworld(), config);
         LOGGER.info("Restored {} simulated survivors from persistent storage", restored.size());
 
         restored.forEach(bot -> bot.resetRuntime(config));
@@ -70,7 +77,7 @@ public final class AIDirectorService {
     private void spawnMissingSurvivors(MinecraftServer server, int missing) {
         List<SimulatedSurvivor> spawned = new ArrayList<>();
         for (int i = 0; i < missing; i++) {
-            SimulatedSurvivor survivor = SimulatedSurvivor.bootstrap(UUID.randomUUID(), config);
+            SimulatedSurvivor survivor = SimulatedSurvivor.bootstrap(UUID.randomUUID(), config, server.overworld());
             persistence.store(server.overworld(), survivor);
             spawned.add(survivor);
         }

@@ -12,8 +12,12 @@ public final class LootRecoveryGoal implements Goal {
 
     @Override
     public void execute(SurvivorContext context) {
-        context.survivor().memory().combatLog().append("Navigating to corpse and recovering loadout incrementally");
-        context.integrations().corpse().recoverGradually(context.survivor().id(), 2);
-        context.survivor().memory().setCurrentMode(SurvivorState.TacticalMode.LOOT_RECOVERY);
+        boolean moved = context.integrations().corpse().recoverGradually(context.survivor(), 1, 2);
+        if (!moved) {
+            return;
+        }
+
+        context.survivor().memory().combatLog().append("Recovering 1 item from corpse/container this interaction window");
+        context.survivor().setState(context.survivor().state().withMode(SurvivorState.TacticalMode.LOOT_RECOVERY));
     }
 }

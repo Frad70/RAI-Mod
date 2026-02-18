@@ -30,9 +30,11 @@ neoForge {
 
 repositories {
     mavenCentral()
+    maven { url = 'https://jitpack.io' }
 }
 
 dependencies {
+    compileOnly 'com.github.cabaletta:baritone-api:1.10.2'
 }
 
 tasks.withType(JavaCompile).configureEach {

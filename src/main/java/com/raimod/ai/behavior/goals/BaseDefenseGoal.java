@@ -2,6 +2,7 @@ package com.raimod.ai.behavior.goals;
 
 import com.raimod.ai.behavior.SurvivorContext;
 import com.raimod.entity.SurvivorState;
+import net.minecraft.world.entity.Entity;
 
 public final class BaseDefenseGoal implements Goal {
     @Override
@@ -14,6 +15,18 @@ public final class BaseDefenseGoal implements Goal {
     public void execute(SurvivorContext context) {
         context.survivor().memory().combatLog().append("Switching to BASE_DEFENSE near home territory");
         context.integrations().voiceChat().broadcastSquadPing(context.survivor().id(), "home_under_attack");
-        context.survivor().memory().setCurrentMode(SurvivorState.TacticalMode.BASE_DEFENSE);
+
+        Entity target = context.server().overworld().getNearestPlayer(context.survivor().fakePlayer(), 28.0);
+        if (target != null) {
+            float accuracy = context.integrations().physicalStats().getAccuracySkill(context.survivor().id());
+            context.integrations().tacz().calculateLeadShot(
+                target,
+                context.survivor().fakePlayer().getMainHandItem(),
+                context.config().baseAimScatterDegrees(),
+                accuracy
+            );
+        }
+
+        context.survivor().setState(context.survivor().state().withMode(SurvivorState.TacticalMode.BASE_DEFENSE));
     }
 }

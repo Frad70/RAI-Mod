@@ -13,6 +13,6 @@ public final class ProgressionGoal implements Goal {
     public void execute(SurvivorContext context) {
         context.integrations().physicalStats().train(context.survivor().id(), "mining");
         context.survivor().memory().refreshStaleKnowledge(context.server(), context.config().memoryRevalidationSeconds());
-        context.survivor().memory().setCurrentMode(SurvivorState.TacticalMode.FARMING);
+        context.survivor().setState(context.survivor().state().withMode(SurvivorState.TacticalMode.FARMING));
     }
 }

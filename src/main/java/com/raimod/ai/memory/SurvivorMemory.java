@@ -7,12 +7,14 @@ import java.util.Comparator;
 import java.util.Deque;
 import java.util.List;
 import java.util.UUID;
+import net.minecraft.core.BlockPos;
 import net.minecraft.server.MinecraftServer;
 
 public final class SurvivorMemory {
     private final UUID survivorId;
     private final List<RaidTargetKnowledge> raidTargets;
     private final List<WorldKnowledgePoint> worldPoints;
+    private final List<BlockPos> dangerousBlocks;
     private final Deque<String> combatLog;
     private SurvivorState.TacticalMode currentMode;
 
@@ -20,6 +22,7 @@ public final class SurvivorMemory {
         this.survivorId = survivorId;
         this.raidTargets = new ArrayList<>();
         this.worldPoints = new ArrayList<>();
+        this.dangerousBlocks = new ArrayList<>();
         this.combatLog = new ArrayDeque<>();
         this.currentMode = SurvivorState.TacticalMode.SCOUTING;
     }
@@ -34,7 +37,7 @@ public final class SurvivorMemory {
 
     public RaidTargetKnowledge bestRaidCandidate() {
         return raidTargets.stream()
-            .max(Comparator.comparingDouble(RaidTargetKnowledge::priorityScore))
+            .max(Comparator.comparingInt(RaidTargetKnowledge::knownChestCount))
             .orElse(null);
     }
 
@@ -43,9 +46,27 @@ public final class SurvivorMemory {
         raidTargets.add(knowledge);
     }
 
+    public List<RaidTargetKnowledge> raidTargets() {
+        return List.copyOf(raidTargets);
+    }
+
     public void rememberWorldPoint(WorldKnowledgePoint point) {
         worldPoints.removeIf(existing -> existing.key().equals(point.key()));
         worldPoints.add(point);
+    }
+
+    public List<WorldKnowledgePoint> worldPoints() {
+        return List.copyOf(worldPoints);
+    }
+
+    public void replaceWorldPoints(List<WorldKnowledgePoint> points) {
+        worldPoints.clear();
+        worldPoints.addAll(points);
+    }
+
+    public void replaceRaidTargets(List<RaidTargetKnowledge> targets) {
+        raidTargets.clear();
+        raidTargets.addAll(targets);
     }
 
     public CombatLog combatLog() {
@@ -54,6 +75,19 @@ public final class SurvivorMemory {
 
     public void setCurrentMode(SurvivorState.TacticalMode currentMode) {
         this.currentMode = currentMode;
+    }
+
+    public SurvivorState.TacticalMode currentMode() {
+        return currentMode;
+    }
+
+    public List<BlockPos> dangerousBlocks() {
+        return List.copyOf(dangerousBlocks);
+    }
+
+    public void setDangerousBlocks(List<BlockPos> positions) {
+        dangerousBlocks.clear();
+        dangerousBlocks.addAll(positions);
     }
 
     public void refreshStaleKnowledge(MinecraftServer server, int revalidationSeconds) {
@@ -74,6 +108,10 @@ public final class SurvivorMemory {
             while (lines.size() > 128) {
                 lines.removeFirst();
             }
+        }
+
+        public List<String> snapshot() {
+            return List.copyOf(lines);
         }
     }
 }
