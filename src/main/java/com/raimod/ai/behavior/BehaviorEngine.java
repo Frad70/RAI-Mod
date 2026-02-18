@@ -1,6 +1,7 @@
 package com.raimod.ai.behavior;
 
 import com.raimod.ai.behavior.goals.BaseDefenseGoal;
+import com.raimod.ai.behavior.goals.CombatReactionGoal;
 import com.raimod.ai.behavior.goals.Goal;
 import com.raimod.ai.behavior.goals.LootRecoveryGoal;
 import com.raimod.ai.behavior.goals.ProgressionGoal;
@@ -10,6 +11,7 @@ import java.util.List;
 
 public final class BehaviorEngine {
     private final List<Goal> goals = List.of(
+        new CombatReactionGoal(),
         new BaseDefenseGoal(),
         new LootRecoveryGoal(),
         new RaidGoal(),

@@ -9,23 +9,20 @@ import com.raimod.integration.ModIntegrationRegistry;
 import java.util.Objects;
 import java.util.UUID;
 import net.minecraft.server.level.ServerLevel;
-import net.minecraft.server.level.ServerPlayer;
-import net.minecraft.world.entity.EntityType;
-import net.minecraft.world.entity.PathfinderMob;
-import net.minecraft.world.entity.ai.control.JumpControl;
-import net.minecraft.world.entity.ai.control.LookControl;
-import net.minecraft.world.entity.ai.navigation.GroundPathNavigation;
-import net.minecraft.world.level.pathfinder.PathType;
+import net.minecraft.world.phys.Vec3;
 import net.neoforged.neoforge.common.util.FakePlayer;
 
 public final class SimulatedSurvivor extends FakePlayer {
     private final UUID survivorId;
     private final SurvivorMemory memory;
     private final BehaviorEngine behaviorEngine;
-    private final ControlDelegate controlDelegate;
     private SurvivorState state;
     private ModIntegrationRegistry integrations;
     private RAIServerConfig.RuntimeValues runtime;
+
+    private Vec3 lookTarget;
+    private double strafeInput;
+    private double forwardInput;
 
     public SimulatedSurvivor(ServerLevel level, GameProfile profile, RAIServerConfig.RuntimeValues config) {
         super(level, profile);
@@ -34,7 +31,7 @@ public final class SimulatedSurvivor extends FakePlayer {
         this.behaviorEngine = new BehaviorEngine();
         this.state = SurvivorState.freshSpawn(config.minActiveChunks(), config.maxActiveChunks());
         this.runtime = config;
-        this.controlDelegate = new ControlDelegate(level, this);
+        this.lookTarget = this.getEyePosition().add(this.getLookAngle().scale(3.0));
     }
 
     public static SimulatedSurvivor bootstrap(UUID id, RAIServerConfig.RuntimeValues config, ServerLevel level) {
@@ -72,13 +69,15 @@ public final class SimulatedSurvivor extends FakePlayer {
         }
 
         state = state.withDynamicChunkBudget(this.server, runtime);
-        controlDelegate.syncWithPlayer(this);
 
         integrations.applyChunkTickets(serverLevel(), this, state.loadedChunks());
         integrations.updateVisualDangerScan(serverLevel(), this);
 
         SurvivorContext context = new SurvivorContext(this.server, this, integrations, runtime);
         behaviorEngine.tick(context);
+
+        updateRotationFromLookTarget();
+        applyManualMovement();
     }
 
     public void resetRuntime(RAIServerConfig.RuntimeValues config) {
@@ -86,64 +85,79 @@ public final class SimulatedSurvivor extends FakePlayer {
         this.runtime = config;
     }
 
-    public LookControl getLookControl() {
-        return controlDelegate.lookControl();
+    public void aimAt(Vec3 targetEyePos) {
+        this.lookTarget = targetEyePos;
     }
 
-    public GroundPathNavigation getNavigationDelegate() {
-        return controlDelegate.navigation();
+    public void setMovementInput(double strafe, double forward) {
+        this.strafeInput = strafe;
+        this.forwardInput = forward;
     }
 
-    public JumpControl getJumpControlDelegate() {
-        return controlDelegate.jumpControl();
+    public void clearMovementInput() {
+        this.strafeInput = 0.0;
+        this.forwardInput = 0.0;
     }
 
-    private static final class ControlDelegate extends PathfinderMob {
-        private final LookControl lookControl;
-        private final JumpControl jumpControl;
-        private final GroundPathNavigation navigation;
-
-        private ControlDelegate(ServerLevel level, ServerPlayer anchor) {
-            super(EntityType.ZOMBIE, level);
-            this.setPos(anchor.getX(), anchor.getY(), anchor.getZ());
-            this.lookControl = new SmoothLookControl(this);
-            this.jumpControl = new JumpControl(this);
-            this.navigation = new GroundPathNavigation(this, level);
-            this.setPathfindingMalus(PathType.WATER, 8.0F);
+    private void updateRotationFromLookTarget() {
+        Vec3 eye = this.getEyePosition();
+        Vec3 delta = lookTarget.subtract(eye);
+        if (delta.lengthSqr() < 0.0001) {
+            return;
         }
 
-        public void syncWithPlayer(ServerPlayer player) {
-            this.setPos(player.getX(), player.getY(), player.getZ());
-            this.setYRot(player.getYRot());
-            this.setXRot(player.getXRot());
-            this.lookControl.tick();
-        }
+        double xz = Math.sqrt(delta.x * delta.x + delta.z * delta.z);
+        float targetYaw = (float) (Math.toDegrees(Math.atan2(delta.z, delta.x)) - 90.0);
+        float targetPitch = (float) (-Math.toDegrees(Math.atan2(delta.y, xz)));
 
-        public LookControl lookControl() {
-            return lookControl;
-        }
+        float yaw = lerpAngle(this.getYRot(), targetYaw, 5.0f);
+        float pitch = lerp(this.getXRot(), targetPitch, 5.0f);
 
-        public JumpControl jumpControl() {
-            return jumpControl;
-        }
-
-        public GroundPathNavigation navigation() {
-            return navigation;
-        }
-
-        @Override
-        protected void registerGoals() {
-        }
+        this.setYRot(yaw);
+        this.setXRot(pitch);
+        this.yHeadRot = yaw;
+        this.yBodyRot = yaw;
     }
 
-    private static final class SmoothLookControl extends LookControl {
-        private SmoothLookControl(PathfinderMob mob) {
-            super(mob);
+    private void applyManualMovement() {
+        if (Math.abs(strafeInput) < 0.001 && Math.abs(forwardInput) < 0.001) {
+            this.setDeltaMovement(this.getDeltaMovement().scale(0.55));
+            return;
         }
 
-        @Override
-        protected float rotateTowards(float current, float target, float maxDelta) {
-            return super.rotateTowards(current, target, Math.min(maxDelta, 3.0F));
+        Vec3 look = this.getLookAngle();
+        Vec3 forward = new Vec3(look.x, 0, look.z).normalize();
+        Vec3 right = new Vec3(-forward.z, 0, forward.x);
+
+        Vec3 motion = forward.scale(forwardInput).add(right.scale(strafeInput));
+        if (motion.lengthSqr() > 1.0) {
+            motion = motion.normalize();
         }
+
+        double speed = this.isSprinting() ? 0.23 : 0.17;
+        Vec3 next = this.getDeltaMovement().scale(0.35).add(motion.scale(speed));
+        this.setDeltaMovement(next.x, this.getDeltaMovement().y, next.z);
+    }
+
+    private float lerp(float current, float target, float maxStep) {
+        float delta = target - current;
+        if (delta > maxStep) {
+            delta = maxStep;
+        }
+        if (delta < -maxStep) {
+            delta = -maxStep;
+        }
+        return current + delta;
+    }
+
+    private float lerpAngle(float current, float target, float maxStep) {
+        float delta = net.minecraft.util.Mth.wrapDegrees(target - current);
+        if (delta > maxStep) {
+            delta = maxStep;
+        }
+        if (delta < -maxStep) {
+            delta = -maxStep;
+        }
+        return current + delta;
     }
 }

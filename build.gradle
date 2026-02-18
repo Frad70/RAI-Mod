@@ -8,6 +8,8 @@ group = mod_group_id
 version = mod_version
 
 java.toolchain.languageVersion = JavaLanguageVersion.of(21)
+sourceCompatibility = JavaVersion.VERSION_21
+targetCompatibility = JavaVersion.VERSION_21
 
 neoForge {
     version = neo_version

@@ -8,21 +8,23 @@ import baritone.api.process.ICustomGoalProcess;
 import com.raimod.entity.SimulatedSurvivor;
 import com.raimod.entity.SurvivorState;
 import java.util.ArrayList;
+import java.util.Iterator;
 import java.util.List;
 import java.util.UUID;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
+import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.TicketType;
 import net.minecraft.util.Mth;
+import net.minecraft.world.Container;
 import net.minecraft.world.InteractionHand;
 import net.minecraft.world.InteractionResult;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.item.ItemStack;
-import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.world.level.ChunkPos;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.phys.AABB;
@@ -40,6 +42,7 @@ public final class ModIntegrationRegistry {
     private final VoiceChatBridge voiceChat = new VoiceChatBridge();
     private final SecurityCraftBridge securityCraft = new SecurityCraftBridge();
     private final PhysicalStatsBridge physicalStats = new PhysicalStatsBridge();
+    private final List<LoudSoundEvent> loudSounds = new ArrayList<>();
 
     public void bootstrap(MinecraftServer server) {
         baritone.setEnabled(ModList.get().isLoaded("baritone"));
@@ -56,6 +59,28 @@ public final class ModIntegrationRegistry {
         voiceChat.tick(server);
         securityCraft.tick(server);
         physicalStats.tick(server);
+
+        Iterator<LoudSoundEvent> it = loudSounds.iterator();
+        while (it.hasNext()) {
+            LoudSoundEvent event = it.next();
+            if (event.expiresAtTick < server.getTickCount()) {
+                it.remove();
+            }
+        }
+    }
+
+    public void reportLoudSound(BlockPos pos, int radius, MinecraftServer server) {
+        loudSounds.add(new LoudSoundEvent(pos.immutable(), radius, server.getTickCount() + 40));
+    }
+
+    public boolean hasLoudSoundNear(SimulatedSurvivor survivor, int radius) {
+        BlockPos bot = survivor.blockPosition();
+        for (LoudSoundEvent event : loudSounds) {
+            if (event.position.distSqr(bot) <= (long) radius * radius) {
+                return true;
+            }
+        }
+        return false;
     }
 
     public void applyChunkTickets(ServerLevel level, SimulatedSurvivor survivor, int configuredRadius) {
@@ -73,6 +98,48 @@ public final class ModIntegrationRegistry {
         List<BlockPos> dangerous = securityCraft.scanMinesInFov(level, survivor);
         survivor.memory().setDangerousBlocks(dangerous);
         baritone.updateAvoidBlocks(survivor, dangerous);
+    }
+
+    public BlockPos findCoverPosition(ServerLevel level, Vec3 attackerEye, SimulatedSurvivor survivor) {
+        BlockPos center = survivor.blockPosition();
+        for (int x = -10; x <= 10; x++) {
+            for (int y = -3; y <= 3; y++) {
+                for (int z = -10; z <= 10; z++) {
+                    BlockPos candidate = center.offset(x, y, z);
+                    if (!level.getBlockState(candidate).isAir()) {
+                        continue;
+                    }
+                    BlockPos chestHigh = candidate.above();
+                    if (!level.getBlockState(chestHigh).isAir()) {
+                        continue;
+                    }
+
+                    Vec3 botEye = new Vec3(candidate.getX() + 0.5, candidate.getY() + 1.62, candidate.getZ() + 0.5);
+                    var clip = level.clip(new net.minecraft.world.level.ClipContext(attackerEye, botEye,
+                        net.minecraft.world.level.ClipContext.Block.COLLIDER,
+                        net.minecraft.world.level.ClipContext.Fluid.NONE,
+                        survivor));
+
+                    if (clip.getType() == net.minecraft.world.phys.HitResult.Type.BLOCK) {
+                        return candidate.immutable();
+                    }
+                }
+            }
+        }
+        return null;
+    }
+
+    public boolean useHealingItem(SimulatedSurvivor survivor) {
+        for (int i = 0; i < survivor.getInventory().getContainerSize(); i++) {
+            ItemStack stack = survivor.getInventory().getItem(i);
+            String id = BuiltInRegistries.ITEM.getKey(stack.getItem()).toString();
+            if (id.contains("med") || id.contains("bandage") || stack.isEdible()) {
+                survivor.getInventory().selected = i;
+                survivor.startUsingItem(InteractionHand.MAIN_HAND);
+                return true;
+            }
+        }
+        return false;
     }
 
     public BaritoneBridge baritone() {
@@ -143,6 +210,14 @@ public final class ModIntegrationRegistry {
             process.setGoalAndPath(new GoalNear(retreatPos, 1));
         }
 
+        public void setCoverGoal(SimulatedSurvivor survivor, BlockPos coverPos) {
+            if (!isEnabled()) {
+                return;
+            }
+            ICustomGoalProcess process = getFor(survivor).getCustomGoalProcess();
+            process.setGoalAndPath(new GoalBlock(coverPos));
+        }
+
         public void updateAvoidBlocks(SimulatedSurvivor survivor, List<BlockPos> avoidBlocks) {
             if (!isEnabled()) {
                 return;
@@ -151,7 +226,6 @@ public final class ModIntegrationRegistry {
             baritone.getPathingBehavior().cancelEverything();
             BaritoneAPI.getSettings().allowParkour.value = false;
             BaritoneAPI.getSettings().avoidance.value = true;
-            // API versions differ for direct avoid-list injection; this is set on a per-bot baritone instance.
         }
     }
 
@@ -178,6 +252,20 @@ public final class ModIntegrationRegistry {
             Vec3 direction = compensated.subtract(shooterEye).normalize();
             Vec3 finalDir = direction.xRot((float) pitchScatter).yRot((float) yawScatter);
             return shooterEye.add(finalDir.scale(distance));
+        }
+
+        public boolean isGunEmpty(ItemStack gun) {
+            CompoundTag tag = gun.getTag();
+            if (tag == null) {
+                return false;
+            }
+            if (tag.contains("Ammo")) {
+                return tag.getInt("Ammo") <= 0;
+            }
+            if (tag.contains("CurrentAmmo")) {
+                return tag.getInt("CurrentAmmo") <= 0;
+            }
+            return false;
         }
 
         public void prepareRaidLoadout(UUID survivorId, double threat) {
@@ -209,8 +297,7 @@ public final class ModIntegrationRegistry {
                 gravity = 0.05;
             }
 
-            // If TacZ API is present in your environment, replace with direct call:
-            // IGun.getGunData(gun).getBulletVelocity(), IGun.getGunData(gun).getGravity()
+            // If TacZ API is available in your runtime, replace with direct API read.
             return new TaczBulletData(velocity, gravity);
         }
 
@@ -221,8 +308,8 @@ public final class ModIntegrationRegistry {
                 }
             }
             for (String key : tag.getAllKeys()) {
-                CompoundTag nested = tag.getCompound(key);
-                if (!nested.isEmpty()) {
+                if (tag.contains(key, net.minecraft.nbt.Tag.TAG_COMPOUND)) {
+                    CompoundTag nested = tag.getCompound(key);
                     double value = firstNumeric(nested, keys);
                     if (value > 0) {
                         return value;
@@ -238,7 +325,7 @@ public final class ModIntegrationRegistry {
             return isEnabled();
         }
 
-        public boolean transferOneItem(SimulatedSurvivor survivor, net.minecraft.world.Container source, int minTicks, int maxTicks) {
+        public boolean transferOneItem(SimulatedSurvivor survivor, Container source, int minTicks, int maxTicks) {
             SurvivorState state = survivor.state();
             if (state.interactionCooldownTicks() > 0) {
                 return false;
@@ -349,5 +436,8 @@ public final class ModIntegrationRegistry {
             }
         }
         return ItemStack.EMPTY;
+    }
+
+    private record LoudSoundEvent(BlockPos position, int radius, int expiresAtTick) {
     }
 }
