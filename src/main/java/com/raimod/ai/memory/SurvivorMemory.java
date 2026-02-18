@@ -2,6 +2,7 @@ package com.raimod.ai.memory;
 
 import com.raimod.entity.SimulatedSurvivor;
 import com.raimod.entity.SurvivorState;
+import com.raimod.integration.SurvivorChatBridge;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Comparator;
@@ -14,10 +15,13 @@ import net.minecraft.core.BlockPos;
 import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.util.Mth;
+import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.item.ItemEntity;
 import net.minecraft.world.item.ItemStack;
 
 public final class SurvivorMemory {
+    public static final int DEFAULT_HOME_CLAIM_RADIUS = 24;
+
     private final UUID survivorId;
     private final List<RaidTargetKnowledge> raidTargets;
     private final List<WorldKnowledgePoint> worldPoints;
@@ -29,6 +33,7 @@ public final class SurvivorMemory {
     private final Deque<String> combatLog;
     private SurvivorState.TacticalMode currentMode;
     private BlockPos homePosition;
+    private HomeBase homeBase;
 
     private SurvivorMemory(UUID survivorId) {
         this.survivorId = survivorId;
@@ -42,6 +47,7 @@ public final class SurvivorMemory {
         this.combatLog = new ArrayDeque<>();
         this.currentMode = SurvivorState.TacticalMode.SCOUTING;
         this.homePosition = BlockPos.ZERO;
+        this.homeBase = null;
     }
 
     public static SurvivorMemory createEmpty(UUID survivorId) {
@@ -104,6 +110,74 @@ public final class SurvivorMemory {
         this.homePosition = homePosition.immutable();
     }
 
+    public HomeBase homeBase() {
+        return homeBase;
+    }
+
+    public boolean hasHomeBase() {
+        return homeBase != null;
+    }
+
+    public void claimHomeBase(BlockPos center, int claimRadius, List<BlockPos> containerPos) {
+        List<BlockPos> normalizedContainers = containerPos.stream().map(BlockPos::immutable).toList();
+        this.homeBase = new HomeBase(center.immutable(), Math.max(8, claimRadius), normalizedContainers);
+        this.homePosition = center.immutable();
+    }
+
+    public void maybeClaimHomeBase(BlockPos bedPos, BlockPos containerPos, int claimRadius) {
+        if (bedPos == null || containerPos == null || hasHomeBase()) {
+            return;
+        }
+        if (bedPos.distSqr(containerPos) > 64.0) {
+            return;
+        }
+        claimHomeBase(bedPos, claimRadius, List.of(containerPos));
+    }
+
+    public boolean shouldReturnHome(boolean isNight, SimulatedSurvivor survivor, double storagePriorityThreshold) {
+        if (!hasHomeBase()) {
+            return false;
+        }
+
+        if (isNight) {
+            return true;
+        }
+
+        int used = 0;
+        int total = survivor.getInventory().getContainerSize();
+        for (int i = 0; i < total; i++) {
+            if (!survivor.getInventory().getItem(i).isEmpty()) {
+                used++;
+            }
+        }
+        return total > 0 && (used / (double) total) >= storagePriorityThreshold;
+    }
+
+    public boolean isHostileInsideHome(Entity entity) {
+        if (!hasHomeBase() || entity == null) {
+            return false;
+        }
+        if (entity.getUUID().equals(survivorId)) {
+            return false;
+        }
+        if (relationOf(entity.getUUID()) > 0.0f) {
+            return false;
+        }
+        HomeBase base = homeBase;
+        return base.center().distSqr(entity.blockPosition()) <= (long) base.claimRadius() * base.claimRadius();
+    }
+
+    public void triggerHomeDefense(SimulatedSurvivor survivor, SurvivorChatBridge chatBridge, Entity intruder) {
+        if (intruder == null || !isHostileInsideHome(intruder)) {
+            return;
+        }
+        setCurrentMode(SurvivorState.TacticalMode.DEFEND_HOME);
+        survivor.setState(survivor.state().withMode(SurvivorState.TacticalMode.DEFEND_HOME));
+        if (chatBridge != null) {
+            chatBridge.sendThreatWarning(survivor, intruder.getName().getString());
+        }
+    }
+
     public List<BlockPos> dangerousBlocks() {
         return List.copyOf(dangerousBlocks);
     }
@@ -120,6 +194,17 @@ public final class SurvivorMemory {
     public void setKnownChests(List<BlockPos> chests) {
         knownChests.clear();
         knownChests.addAll(chests);
+    }
+
+    public void rememberHomeContainer(BlockPos containerPos) {
+        if (containerPos == null || homeBase == null) {
+            return;
+        }
+        if (!homeBase.containerPos().contains(containerPos)) {
+            List<BlockPos> extended = new ArrayList<>(homeBase.containerPos());
+            extended.add(containerPos.immutable());
+            homeBase = new HomeBase(homeBase.center(), homeBase.claimRadius(), List.copyOf(extended));
+        }
     }
 
     public List<String> priorityLoot() {
@@ -273,6 +358,9 @@ public final class SurvivorMemory {
                 worldPoints.set(i, point.withNeedsRevalidation(true));
             }
         }
+    }
+
+    public record HomeBase(BlockPos center, int claimRadius, List<BlockPos> containerPos) {
     }
 
     public record CombatLog(Deque<String> lines) {

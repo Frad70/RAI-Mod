@@ -1,24 +1,34 @@
 package com.raimod.entity;
 
 import com.mojang.authlib.GameProfile;
+import com.raimod.ai.GroupManager;
 import com.raimod.ai.behavior.BehaviorEngine;
 import com.raimod.ai.behavior.SurvivorContext;
 import com.raimod.ai.memory.SurvivorMemory;
 import com.raimod.config.RAIServerConfig;
 import com.raimod.integration.ModIntegrationRegistry;
+import com.raimod.integration.SurvivorChatBridge;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.UUID;
+import net.minecraft.core.BlockPos;
+import net.minecraft.nbt.CompoundTag;
+import net.minecraft.network.chat.Component;
 import net.minecraft.server.level.ServerLevel;
+import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.util.Mth;
 import net.minecraft.world.entity.Entity;
+import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.phys.HitResult;
 import net.minecraft.world.phys.Vec3;
 import net.minecraft.world.level.ClipContext;
 import net.neoforged.neoforge.common.util.FakePlayer;
 
 public final class SimulatedSurvivor extends FakePlayer {
+    private static final SurvivorChatBridge CHAT = new SurvivorChatBridge();
+
     private final UUID survivorId;
     private final SurvivorMemory memory;
     private final BehaviorEngine behaviorEngine;
@@ -37,6 +47,7 @@ public final class SimulatedSurvivor extends FakePlayer {
 
     private int inventoryActionCooldown;
     private int lastInteractedSlot;
+    private int burstTicks;
 
     public SimulatedSurvivor(ServerLevel level, GameProfile profile, RAIServerConfig.RuntimeValues config) {
         super(level, profile);
@@ -93,9 +104,10 @@ public final class SimulatedSurvivor extends FakePlayer {
     }
 
     public void markInventoryInteraction(int slot) {
-        int base = 1 + this.level().random.nextInt(4);
+        int base = runtime != null ? runtime.baseDelayTicks() : 1;
+        base += this.level().random.nextInt(4);
         if (lastInteractedSlot >= 0 && Math.abs(slot - lastInteractedSlot) > 3) {
-            base += 2;
+            base += runtime != null ? runtime.slotDistancePenalty() : 2;
         }
         inventoryActionCooldown = base;
         lastInteractedSlot = slot;
@@ -126,6 +138,7 @@ public final class SimulatedSurvivor extends FakePlayer {
     public void configureRuntime(ModIntegrationRegistry integrations, RAIServerConfig.RuntimeValues runtime) {
         this.integrations = integrations;
         this.runtime = runtime;
+        GroupManager.instance().registerSurvivor(this, runtime.squadMaxSize());
     }
 
     @Override
@@ -150,11 +163,164 @@ public final class SimulatedSurvivor extends FakePlayer {
         integrations.applyChunkTickets(serverLevel(), this, state.loadedChunks());
         integrations.updateVisualDangerScan(serverLevel(), this);
 
+        evaluateTerritorialDefense();
+        applyWeaponMastery();
+        updateSquadContext();
+
         SurvivorContext context = new SurvivorContext(this.server, this, integrations, runtime);
         behaviorEngine.tick(context);
 
         updateRotationFromLookTarget();
         applyManualMovement();
+    }
+
+    private void evaluateTerritorialDefense() {
+        if (!memory.hasHomeBase()) {
+            return;
+        }
+        List<LivingEntity> nearby = this.level().getEntitiesOfClass(LivingEntity.class, this.getBoundingBox().inflate(runtime.claimRadius()));
+        for (LivingEntity entity : nearby) {
+            if (entity == this) {
+                continue;
+            }
+            if (memory.isHostileInsideHome(entity)) {
+                memory.triggerHomeDefense(this, CHAT, entity);
+                break;
+            }
+        }
+    }
+
+    private void updateSquadContext() {
+        GroupManager squads = GroupManager.instance();
+        GroupManager.Squad squad = squads.squadOf(this.id());
+        if (squad == null) {
+            return;
+        }
+
+        if (currentCombatTarget != null) {
+            Entity target = serverLevel().getEntity(currentCombatTarget);
+            if (target != null) {
+                BlockPos lkp = target.blockPosition();
+                squads.reportTargetSpotted(this, currentCombatTarget, lkp);
+                memory.setLastKnownPosition(currentCombatTarget, lkp);
+            }
+        } else if (squad.sharedTargetId() != null && squad.sharedLastKnownPosition() != null) {
+            this.currentCombatTarget = squad.sharedTargetId();
+            memory.setLastKnownPosition(squad.sharedTargetId(), squad.sharedLastKnownPosition());
+        }
+
+        if (GroupManager.instance().shouldSuppressForTeammate(this)) {
+            setState(state.withReactionFireTicks(Math.max(state.reactionFireTicks(), 30)));
+        }
+    }
+
+    private void applyWeaponMastery() {
+        var gun = this.getMainHandItem();
+        if (gun.isEmpty()) {
+            burstTicks = 0;
+            GroupManager.instance().setReloading(this, false);
+            return;
+        }
+
+        CompoundTag tag = gun.getTag();
+        int ammo = readAmmo(gun);
+        int capacity = readCapacity(tag, ammo);
+        boolean seesEnemy = hasVisibleEnemy();
+
+        if (capacity > 0 && ammo >= 0 && ammo < Math.ceil(capacity * 0.30) && !seesEnemy && canPerformActions()) {
+            setState(state.withMode(SurvivorState.TacticalMode.RELOAD));
+            GroupManager.instance().setReloading(this, true);
+            markInventoryInteraction(this.getInventory().selected);
+        } else {
+            GroupManager.instance().setReloading(this, false);
+        }
+
+        if (hasJam(tag)) {
+            setState(state.withMode(SurvivorState.TacticalMode.SEARCHING));
+            this.setMovementInput(0.0, -0.8);
+            broadcastNearby("[" + this.getGameProfile().getName() + "]: Gun's jammed! Cover me!", 42.0);
+            return;
+        }
+
+        if (seesEnemy && ammo > 0) {
+            burstTicks++;
+            double recoil = readRecoil(tag) * runtime.recoilCompensationFactor();
+            this.setXRot((float) (this.getXRot() - Math.min(3.5, recoil * 0.12 * Math.min(burstTicks, 12))));
+        } else {
+            burstTicks = 0;
+        }
+    }
+
+    private void broadcastNearby(String msg, double radius) {
+        List<ServerPlayer> players = this.serverLevel().getPlayers(player -> player.distanceTo(this) <= radius);
+        Component line = Component.literal(msg);
+        for (ServerPlayer player : players) {
+            player.sendSystemMessage(line);
+        }
+    }
+
+    private int readAmmo(net.minecraft.world.item.ItemStack gun) {
+        CompoundTag tag = gun.getTag();
+        if (tag == null) {
+            return -1;
+        }
+        if (tag.contains("Ammo")) {
+            return tag.getInt("Ammo");
+        }
+        if (tag.contains("CurrentAmmo")) {
+            return tag.getInt("CurrentAmmo");
+        }
+        return -1;
+    }
+
+    private int readCapacity(CompoundTag tag, int fallbackAmmo) {
+        if (tag == null) {
+            return fallbackAmmo > 0 ? fallbackAmmo : -1;
+        }
+        if (tag.contains("MagazineSize")) {
+            return tag.getInt("MagazineSize");
+        }
+        if (tag.contains("MaxAmmo")) {
+            return tag.getInt("MaxAmmo");
+        }
+        return fallbackAmmo > 0 ? fallbackAmmo : -1;
+    }
+
+    private boolean hasJam(CompoundTag tag) {
+        if (tag == null) {
+            return false;
+        }
+        return (tag.contains("Jammed") && tag.getBoolean("Jammed"))
+            || (tag.contains("Malfunction") && tag.getBoolean("Malfunction"));
+    }
+
+    private double readRecoil(CompoundTag tag) {
+        if (tag == null) {
+            return 1.0;
+        }
+        if (tag.contains("RecoilVertical")) {
+            return Math.max(0.1, tag.getDouble("RecoilVertical"));
+        }
+        if (tag.contains("Recoil")) {
+            return Math.max(0.1, tag.getDouble("Recoil"));
+        }
+        return 1.0;
+    }
+
+    private boolean hasVisibleEnemy() {
+        List<LivingEntity> nearby = this.level().getEntitiesOfClass(LivingEntity.class, this.getBoundingBox().inflate(runtime.hearingRange()));
+        for (LivingEntity living : nearby) {
+            if (living == this || living.getUUID().equals(this.id()) || !living.isAlive()) {
+                continue;
+            }
+            if (memory.relationOf(living.getUUID()) > 0.0f) {
+                continue;
+            }
+            if (isEntityVisible(living)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     public void resetRuntime(RAIServerConfig.RuntimeValues config) {
@@ -185,7 +351,7 @@ public final class SimulatedSurvivor extends FakePlayer {
             return false;
         }
 
-        if (target.distanceTo(this) < 10.0 && !target.isSteppingCarefully()) {
+        if (target.distanceTo(this) < runtime.hearingRange() && !target.isSteppingCarefully()) {
             return true;
         }
 
@@ -199,7 +365,10 @@ public final class SimulatedSurvivor extends FakePlayer {
         double angle = Math.toDegrees(Math.acos(dot));
 
         int brightness = this.level().getMaxLocalRawBrightness(this.blockPosition());
-        double maxAngle = brightness < 7 ? 35.0 : 60.0;
+        double maxAngle = brightness < 7 ? runtime.fovNight() : runtime.fovDay();
+        if (target.isSteppingCarefully()) {
+            maxAngle *= runtime.stealthMultiplier();
+        }
         return angle <= maxAngle;
     }
 
@@ -264,6 +433,9 @@ public final class SimulatedSurvivor extends FakePlayer {
         }
 
         double speed = this.isSprinting() ? 0.23 : 0.17;
+        if (GroupManager.instance().roleOf(this.id()) == GroupManager.Role.SUPPORT) {
+            speed *= 0.93;
+        }
         Vec3 next = this.getDeltaMovement().scale(0.35).add(motion.scale(speed));
         this.setDeltaMovement(next.x, this.getDeltaMovement().y, next.z);
         lastStrafeInput = effectiveStrafe;

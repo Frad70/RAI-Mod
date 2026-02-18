@@ -68,6 +68,7 @@ public record SurvivorState(
         FARMING,
         BASE_BUILDING,
         BASE_DEFENSE,
+        DEFEND_HOME,
         COMBAT_REACTION,
         SEARCHING,
         RELOAD,
