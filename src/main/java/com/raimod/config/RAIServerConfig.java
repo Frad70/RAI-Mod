@@ -33,6 +33,11 @@ public final class RAIServerConfig {
 
     public static final ModConfigSpec.IntValue CLAIM_RADIUS;
     public static final ModConfigSpec.DoubleValue STORAGE_PRIORITY_THRESHOLD;
+    public static final ModConfigSpec.IntValue WINDOW_CHECK_INTERVAL_TICKS;
+    public static final ModConfigSpec.IntValue TRAP_SCAN_INTERVAL_TICKS;
+
+    public static final ModConfigSpec.DoubleValue FACTION_TRADE_GAIN;
+    public static final ModConfigSpec.DoubleValue FACTION_KILL_LOSS;
 
     static {
         ModConfigSpec.Builder builder = new ModConfigSpec.Builder();
@@ -75,7 +80,7 @@ public final class RAIServerConfig {
             .comment("[combat] Base marksmanship skill (0..1), affects lead-shot scatter")
             .defineInRange("accuracy_skill", 0.55d, 0.0d, 1.0d);
         RECOIL_COMPENSATION_FACTOR = builder
-            .comment("[combat] Strength of vertical recoil pull-down in auto-fire bursts")
+            .comment("[combat] Strength of recoil compensation for automatic S-curve control")
             .defineInRange("recoil_compensation_factor", 0.85d, 0.0d, 3.0d);
         builder.pop();
 
@@ -131,6 +136,21 @@ public final class RAIServerConfig {
         STORAGE_PRIORITY_THRESHOLD = builder
             .comment("[base] Inventory fill ratio before bot returns home to stash loot")
             .defineInRange("storage_priority_threshold", 0.60d, 0.1d, 1.0d);
+        WINDOW_CHECK_INTERVAL_TICKS = builder
+            .comment("[base] Tick interval between paranoid window scans in DEFEND_HOME")
+            .defineInRange("window_check_interval_ticks", 80, 20, 600);
+        TRAP_SCAN_INTERVAL_TICKS = builder
+            .comment("[base] Tick interval for TNT/pressure-plate trap checks around home")
+            .defineInRange("trap_scan_interval_ticks", 40, 20, 400);
+        builder.pop();
+
+        builder.push("factions");
+        FACTION_TRADE_GAIN = builder
+            .comment("[factions] Relation gain between STAYERS and SETTLERS per successful trade")
+            .defineInRange("trade_gain", 0.08d, 0.0d, 1.0d);
+        FACTION_KILL_LOSS = builder
+            .comment("[factions] Relation penalty between STAYERS and SETTLERS per kill")
+            .defineInRange("kill_loss", 0.15d, 0.0d, 1.0d);
         builder.pop();
 
         SPEC = builder.build();
@@ -165,7 +185,11 @@ public final class RAIServerConfig {
             REPUTATION_LOSS_FRIENDLY_FIRE.get().floatValue(),
             SQUAD_MAX_SIZE.get(),
             CLAIM_RADIUS.get(),
-            STORAGE_PRIORITY_THRESHOLD.get()
+            STORAGE_PRIORITY_THRESHOLD.get(),
+            WINDOW_CHECK_INTERVAL_TICKS.get(),
+            TRAP_SCAN_INTERVAL_TICKS.get(),
+            FACTION_TRADE_GAIN.get(),
+            FACTION_KILL_LOSS.get()
         );
     }
 
@@ -192,7 +216,11 @@ public final class RAIServerConfig {
         float reputationLossFriendlyFire,
         int squadMaxSize,
         int claimRadius,
-        double storagePriorityThreshold
+        double storagePriorityThreshold,
+        int windowCheckIntervalTicks,
+        int trapScanIntervalTicks,
+        double factionTradeGain,
+        double factionKillLoss
     ) {
     }
 }

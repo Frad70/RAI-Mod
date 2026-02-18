@@ -81,7 +81,7 @@ public final class CombatReactionGoal implements Goal {
             survivor,
             target,
             survivor.getMainHandItem(),
-            context.config().baseAimScatterDegrees(),
+            survivor.adjustedAimScatter(context.config().baseAimScatterDegrees()),
             accuracy
         );
         survivor.aimAt(aimPos);
@@ -163,7 +163,7 @@ public final class CombatReactionGoal implements Goal {
 
     private LivingEntity maybePickBetrayalTarget(SurvivorContext context, LivingEntity currentTarget) {
         SimulatedSurvivor survivor = context.survivor();
-        if (survivor.level().random.nextDouble() > 0.10) {
+        if (survivor.level().random.nextDouble() > context.config().betrayalChance()) {
             return null;
         }
 

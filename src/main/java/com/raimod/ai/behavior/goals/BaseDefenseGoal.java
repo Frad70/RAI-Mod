@@ -23,7 +23,7 @@ public final class BaseDefenseGoal implements Goal {
                 context.survivor(),
                 target,
                 context.survivor().getMainHandItem(),
-                context.config().baseAimScatterDegrees(),
+                context.survivor().adjustedAimScatter(context.config().baseAimScatterDegrees()),
                 accuracy
             );
         }

@@ -21,6 +21,8 @@ import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.util.Mth;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.LivingEntity;
+import net.minecraft.world.entity.item.ItemEntity;
+import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.phys.HitResult;
 import net.minecraft.world.phys.Vec3;
 import net.minecraft.world.level.ClipContext;
@@ -138,6 +140,7 @@ public final class SimulatedSurvivor extends FakePlayer {
     public void configureRuntime(ModIntegrationRegistry integrations, RAIServerConfig.RuntimeValues runtime) {
         this.integrations = integrations;
         this.runtime = runtime;
+        GroupManager.instance().configure(runtime);
         GroupManager.instance().registerSurvivor(this, runtime.squadMaxSize());
     }
 
@@ -156,6 +159,9 @@ public final class SimulatedSurvivor extends FakePlayer {
         Entity lastHurt = this.getLastHurtByMob();
         if (lastHurt != null) {
             recentDamageByEntityTick.put(lastHurt.getUUID(), this.tickCount);
+            if (lastHurt instanceof SimulatedSurvivor otherSurvivor) {
+                GroupManager.instance().reportKill(otherSurvivor, this);
+            }
         }
 
         state = state.withDynamicChunkBudget(this.server, runtime);
@@ -164,8 +170,9 @@ public final class SimulatedSurvivor extends FakePlayer {
         integrations.updateVisualDangerScan(serverLevel(), this);
 
         evaluateTerritorialDefense();
-        applyWeaponMastery();
         updateSquadContext();
+        handleSquadLogistics();
+        applyWeaponMastery();
 
         SurvivorContext context = new SurvivorContext(this.server, this, integrations, runtime);
         behaviorEngine.tick(context);
@@ -178,14 +185,31 @@ public final class SimulatedSurvivor extends FakePlayer {
         if (!memory.hasHomeBase()) {
             return;
         }
+
         List<LivingEntity> nearby = this.level().getEntitiesOfClass(LivingEntity.class, this.getBoundingBox().inflate(runtime.claimRadius()));
         for (LivingEntity entity : nearby) {
             if (entity == this) {
                 continue;
             }
-            if (memory.isHostileInsideHome(entity)) {
+            if (isHostile(entity)) {
                 memory.triggerHomeDefense(this, CHAT, entity);
                 break;
+            }
+        }
+
+        if (state.tacticalMode() == SurvivorState.TacticalMode.DEFEND_HOME) {
+            BlockPos window = memory.pickWindowScanPosition(serverLevel(), this.level().getGameTime(), runtime.windowCheckIntervalTicks());
+            if (window != null) {
+                integrations.baritone().setCoverGoal(this, window);
+                this.aimAt(Vec3.atCenterOf(window));
+            }
+        }
+
+        SurvivorMemory.TrapAlert trap = memory.detectNearbyTrap(serverLevel(), this, this.level().getGameTime(), runtime.trapScanIntervalTicks());
+        if (trap != null) {
+            boolean broken = serverLevel().destroyBlock(trap.pos(), false, this);
+            if (!broken) {
+                CHAT.sendThreatWarning(this, "trap spotted near home: " + trap.type());
             }
         }
     }
@@ -209,13 +233,74 @@ public final class SimulatedSurvivor extends FakePlayer {
             memory.setLastKnownPosition(squad.sharedTargetId(), squad.sharedLastKnownPosition());
         }
 
-        if (GroupManager.instance().shouldSuppressForTeammate(this)) {
+        if (squads.shouldSuppressForTeammate(this)) {
             setState(state.withReactionFireTicks(Math.max(state.reactionFireTicks(), 30)));
         }
     }
 
+    private void handleSquadLogistics() {
+        if (hasVisibleEnemy()) {
+            return;
+        }
+
+        GroupManager squads = GroupManager.instance();
+        if (ammoRatio() < 0.20) {
+            SimulatedSurvivor donor = squads.findBestAmmoDonor(this);
+            if (donor != null) {
+                donor.shareAmmoWith(this);
+                squads.reportTrade(donor, this);
+            }
+        }
+
+        List<SimulatedSurvivor> mates = squads.onlineSquadmates(this);
+        for (SimulatedSurvivor mate : mates) {
+            if (mate.getHealth() > mate.getMaxHealth() * 0.30f) {
+                continue;
+            }
+            SimulatedSurvivor medic = squads.findNearestMedic(mate);
+            if (medic != null) {
+                medic.performMedicSupport(mate);
+            }
+        }
+    }
+
+    private void shareAmmoWith(SimulatedSurvivor teammate) {
+        int slot = findLargestAmmoSlot();
+        if (slot < 0 || !canPerformActions()) {
+            return;
+        }
+        ItemStack stack = this.getInventory().getItem(slot);
+        int split = Math.max(1, stack.getCount() / 2);
+        ItemStack shared = this.getInventory().removeItem(slot, split);
+        markInventoryInteraction(slot);
+
+        ItemEntity dropped = new ItemEntity(this.level(), teammate.getX(), teammate.getY() + 0.5, teammate.getZ(), shared);
+        dropped.setPickUpDelay(0);
+        this.level().addFreshEntity(dropped);
+    }
+
+    private void performMedicSupport(SimulatedSurvivor teammate) {
+        int medkitSlot = findMedkitSlot();
+        if (medkitSlot < 0 || !canPerformActions()) {
+            return;
+        }
+
+        if (this.distanceTo(teammate) <= 3.5f) {
+            teammate.heal(6.0f);
+            this.getInventory().removeItem(medkitSlot, 1);
+            markInventoryInteraction(medkitSlot);
+            return;
+        }
+
+        ItemStack med = this.getInventory().removeItem(medkitSlot, 1);
+        markInventoryInteraction(medkitSlot);
+        ItemEntity dropped = new ItemEntity(this.level(), teammate.getX(), teammate.getY() + 0.5, teammate.getZ(), med);
+        dropped.setPickUpDelay(0);
+        this.level().addFreshEntity(dropped);
+    }
+
     private void applyWeaponMastery() {
-        var gun = this.getMainHandItem();
+        ItemStack gun = this.getMainHandItem();
         if (gun.isEmpty()) {
             burstTicks = 0;
             GroupManager.instance().setReloading(this, false);
@@ -244,11 +329,20 @@ public final class SimulatedSurvivor extends FakePlayer {
 
         if (seesEnemy && ammo > 0) {
             burstTicks++;
-            double recoil = readRecoil(tag) * runtime.recoilCompensationFactor();
-            this.setXRot((float) (this.getXRot() - Math.min(3.5, recoil * 0.12 * Math.min(burstTicks, 12))));
+            applySCurveRecoilCompensation(readRecoil(tag));
         } else {
             burstTicks = 0;
         }
+    }
+
+    private void applySCurveRecoilCompensation(double recoilStat) {
+        double strength = recoilStat * runtime.recoilCompensationFactor();
+        double verticalPull = Math.min(3.8, (0.1 + 0.04 * burstTicks) * strength);
+        double horizontal = Math.sin(burstTicks * 0.45) * (0.35 * strength);
+
+        this.setXRot((float) (this.getXRot() - verticalPull));
+        this.setYRot((float) (this.getYRot() + horizontal));
+        this.yHeadRot = this.getYRot();
     }
 
     private void broadcastNearby(String msg, double radius) {
@@ -259,7 +353,7 @@ public final class SimulatedSurvivor extends FakePlayer {
         }
     }
 
-    private int readAmmo(net.minecraft.world.item.ItemStack gun) {
+    private int readAmmo(ItemStack gun) {
         CompoundTag tag = gun.getTag();
         if (tag == null) {
             return -1;
@@ -307,13 +401,56 @@ public final class SimulatedSurvivor extends FakePlayer {
         return 1.0;
     }
 
+    public double ammoRatio() {
+        int ammo = readAmmo(this.getMainHandItem());
+        int cap = readCapacity(this.getMainHandItem().getTag(), ammo);
+        if (ammo < 0 || cap <= 0) {
+            return 1.0;
+        }
+        return Math.max(0.0, Math.min(1.0, ammo / (double) cap));
+    }
+
+    public boolean hasMedkit() {
+        return findMedkitSlot() >= 0;
+    }
+
+    private int findMedkitSlot() {
+        for (int i = 0; i < this.getInventory().getContainerSize(); i++) {
+            String id = net.minecraft.core.registries.BuiltInRegistries.ITEM.getKey(this.getInventory().getItem(i).getItem()).toString().toLowerCase();
+            if (id.contains("medkit") || id.contains("bandage") || id.contains("med")) {
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    private int findLargestAmmoSlot() {
+        int bestSlot = -1;
+        int bestCount = 0;
+        for (int i = 0; i < this.getInventory().getContainerSize(); i++) {
+            ItemStack stack = this.getInventory().getItem(i);
+            if (stack.isEmpty()) {
+                continue;
+            }
+            String id = net.minecraft.core.registries.BuiltInRegistries.ITEM.getKey(stack.getItem()).toString().toLowerCase();
+            if (!id.contains("ammo")) {
+                continue;
+            }
+            if (stack.getCount() > bestCount) {
+                bestCount = stack.getCount();
+                bestSlot = i;
+            }
+        }
+        return bestSlot;
+    }
+
     private boolean hasVisibleEnemy() {
         List<LivingEntity> nearby = this.level().getEntitiesOfClass(LivingEntity.class, this.getBoundingBox().inflate(runtime.hearingRange()));
         for (LivingEntity living : nearby) {
             if (living == this || living.getUUID().equals(this.id()) || !living.isAlive()) {
                 continue;
             }
-            if (memory.relationOf(living.getUUID()) > 0.0f) {
+            if (!isHostile(living)) {
                 continue;
             }
             if (isEntityVisible(living)) {
@@ -321,6 +458,22 @@ public final class SimulatedSurvivor extends FakePlayer {
             }
         }
         return false;
+    }
+
+    private boolean isHostile(Entity entity) {
+        if (entity instanceof SimulatedSurvivor other) {
+            if (GroupManager.instance().areHostile(this, other)) {
+                return true;
+            }
+        }
+        return memory.relationOf(entity.getUUID()) <= 0.0f;
+    }
+
+    public double adjustedAimScatter(double baseScatter) {
+        if (GroupManager.instance().hasConfidenceBuff(this)) {
+            return baseScatter * 0.85;
+        }
+        return baseScatter;
     }
 
     public void resetRuntime(RAIServerConfig.RuntimeValues config) {
