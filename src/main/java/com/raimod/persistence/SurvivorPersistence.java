@@ -59,10 +59,10 @@ public final class SurvivorPersistence {
         root.put("KnownChests", chests);
 
         ListTag relations = new ListTag();
-        for (Map.Entry<UUID, Integer> entry : memory.relationMatrix().entrySet()) {
+        for (Map.Entry<UUID, Float> entry : memory.relations().entrySet()) {
             CompoundTag relation = new CompoundTag();
             relation.putUUID("Player", entry.getKey());
-            relation.putInt("Value", entry.getValue());
+            relation.putFloat("Value", entry.getValue());
             relations.add(relation);
         }
         root.put("Relations", relations);
@@ -128,10 +128,10 @@ public final class SurvivorPersistence {
                     memory.setKnownChests(knownChests);
 
                     ListTag relations = root.getList("Relations", Tag.TAG_COMPOUND);
-                    Map<UUID, Integer> relationMap = new HashMap<>();
+                    Map<UUID, Float> relationMap = new HashMap<>();
                     for (int i = 0; i < relations.size(); i++) {
                         CompoundTag relation = relations.getCompound(i);
-                        relationMap.put(relation.getUUID("Player"), relation.getInt("Value"));
+                        relationMap.put(relation.getUUID("Player"), relation.getFloat("Value"));
                     }
                     memory.replaceRelations(relationMap);
 

@@ -166,19 +166,8 @@ public final class CombatReactionGoal implements Goal {
             return false;
         }
 
-        BlockPos pos = entity.blockPosition();
-        for (int x = -2; x <= 2; x++) {
-            for (int y = -1; y <= 3; y++) {
-                for (int z = -2; z <= 2; z++) {
-                    BlockPos scan = pos.offset(x, y, z);
-                    if (!level.getBlockState(scan).isAir() && level.getBlockState(scan).isCollisionShapeFullBlock(level, scan)
-                        && scan.getY() >= pos.getY() + 1) {
-                        return true;
-                    }
-                }
-            }
-        }
-        return false;
+        BlockPos above = entity.blockPosition().above();
+        return !level.getBlockState(above).isAir() && level.getBlockState(above).isCollisionShapeFullBlock(level, above);
     }
 
     private record ScoredTarget(LivingEntity entity, double score) {

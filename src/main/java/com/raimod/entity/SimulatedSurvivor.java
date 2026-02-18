@@ -137,6 +137,10 @@ public final class SimulatedSurvivor extends FakePlayer {
             return false;
         }
 
+        if (target.distanceTo(this) < 10.0 && !target.isSteppingCarefully()) {
+            return true;
+        }
+
         if (wasRecentlyDamagedBy(target, 100)) {
             return true;
         }

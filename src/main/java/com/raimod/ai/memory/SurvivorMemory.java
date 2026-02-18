@@ -11,6 +11,7 @@ import java.util.Map;
 import java.util.UUID;
 import net.minecraft.core.BlockPos;
 import net.minecraft.server.MinecraftServer;
+import net.minecraft.util.Mth;
 
 public final class SurvivorMemory {
     private final UUID survivorId;
@@ -18,7 +19,7 @@ public final class SurvivorMemory {
     private final List<WorldKnowledgePoint> worldPoints;
     private final List<BlockPos> dangerousBlocks;
     private final List<BlockPos> knownChests;
-    private final Map<UUID, Integer> relationMatrix;
+    private final Map<UUID, Float> relations;
     private final Deque<String> combatLog;
     private SurvivorState.TacticalMode currentMode;
     private BlockPos homePosition;
@@ -29,7 +30,7 @@ public final class SurvivorMemory {
         this.worldPoints = new ArrayList<>();
         this.dangerousBlocks = new ArrayList<>();
         this.knownChests = new ArrayList<>();
-        this.relationMatrix = new HashMap<>();
+        this.relations = new HashMap<>();
         this.combatLog = new ArrayDeque<>();
         this.currentMode = SurvivorState.TacticalMode.SCOUTING;
         this.homePosition = BlockPos.ZERO;
@@ -113,17 +114,34 @@ public final class SurvivorMemory {
         knownChests.addAll(chests);
     }
 
-    public Map<UUID, Integer> relationMatrix() {
-        return Map.copyOf(relationMatrix);
+    public Map<UUID, Float> relations() {
+        return Map.copyOf(relations);
     }
 
-    public void setRelation(UUID targetId, int value) {
-        relationMatrix.put(targetId, value);
+    public float relationOf(UUID targetId) {
+        return relations.getOrDefault(targetId, 0.0f);
     }
 
-    public void replaceRelations(Map<UUID, Integer> relations) {
-        relationMatrix.clear();
-        relationMatrix.putAll(relations);
+    public void setRelation(UUID targetId, float value) {
+        relations.put(targetId, Mth.clamp(value, -1.0f, 1.0f));
+    }
+
+    public void adjustRelation(UUID targetId, float delta) {
+        float next = relationOf(targetId) + delta;
+        relations.put(targetId, Mth.clamp(next, -1.0f, 1.0f));
+    }
+
+    public void onAllySavedMe(UUID allyId) {
+        adjustRelation(allyId, 0.2f);
+    }
+
+    public void onSuppressedBy(UUID aggressorId) {
+        adjustRelation(aggressorId, -0.1f);
+    }
+
+    public void replaceRelations(Map<UUID, Float> relationValues) {
+        relations.clear();
+        relationValues.forEach(this::setRelation);
     }
 
     public void refreshStaleKnowledge(MinecraftServer server, int revalidationSeconds) {
