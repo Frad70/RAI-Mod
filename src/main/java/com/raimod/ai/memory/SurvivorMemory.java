@@ -10,8 +10,10 @@ import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import net.minecraft.core.BlockPos;
+import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.util.Mth;
+import net.minecraft.world.item.ItemStack;
 
 public final class SurvivorMemory {
     private final UUID survivorId;
@@ -19,6 +21,7 @@ public final class SurvivorMemory {
     private final List<WorldKnowledgePoint> worldPoints;
     private final List<BlockPos> dangerousBlocks;
     private final List<BlockPos> knownChests;
+    private final List<String> priorityLoot;
     private final Map<UUID, Float> relations;
     private final Deque<String> combatLog;
     private SurvivorState.TacticalMode currentMode;
@@ -30,6 +33,7 @@ public final class SurvivorMemory {
         this.worldPoints = new ArrayList<>();
         this.dangerousBlocks = new ArrayList<>();
         this.knownChests = new ArrayList<>();
+        this.priorityLoot = new ArrayList<>(List.of("tacz", "ammo", "medkit"));
         this.relations = new HashMap<>();
         this.combatLog = new ArrayDeque<>();
         this.currentMode = SurvivorState.TacticalMode.SCOUTING;
@@ -112,6 +116,59 @@ public final class SurvivorMemory {
     public void setKnownChests(List<BlockPos> chests) {
         knownChests.clear();
         knownChests.addAll(chests);
+    }
+
+    public List<String> priorityLoot() {
+        return List.copyOf(priorityLoot);
+    }
+
+    public void addPriorityLootToken(String token) {
+        String normalized = token.toLowerCase();
+        if (!priorityLoot.contains(normalized)) {
+            priorityLoot.add(normalized);
+        }
+    }
+
+    public boolean isPriorityLoot(ItemStack stack) {
+        String id = BuiltInRegistries.ITEM.getKey(stack.getItem()).toString().toLowerCase();
+        for (String token : priorityLoot) {
+            if (id.contains(token)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    public boolean shouldOverrideGoalForLoot(ItemStack seen, ItemStack currentMainHand) {
+        if (!isPriorityLoot(seen)) {
+            return false;
+        }
+
+        int seenScore = lootScore(seen);
+        int currentScore = lootScore(currentMainHand);
+        return seenScore > currentScore;
+    }
+
+    private int lootScore(ItemStack stack) {
+        if (stack == null || stack.isEmpty()) {
+            return 0;
+        }
+        String id = BuiltInRegistries.ITEM.getKey(stack.getItem()).toString().toLowerCase();
+
+        int score = 5;
+        if (id.contains("tacz")) {
+            score += 50;
+        }
+        if (id.contains("ammo")) {
+            score += 35;
+        }
+        if (id.contains("medkit")) {
+            score += 45;
+        }
+        if (id.contains("legendary") || id.contains("epic")) {
+            score += 25;
+        }
+        return score;
     }
 
     public Map<UUID, Float> relations() {

@@ -32,6 +32,7 @@ public final class SimulatedSurvivor extends FakePlayer {
     private Vec3 lookTarget;
     private double strafeInput;
     private double forwardInput;
+    private double lastStrafeInput;
     private UUID currentCombatTarget;
 
     public SimulatedSurvivor(ServerLevel level, GameProfile profile, RAIServerConfig.RuntimeValues config) {
@@ -150,7 +151,9 @@ public final class SimulatedSurvivor extends FakePlayer {
         double dot = Mth.clamp(look.dot(toTarget), -1.0, 1.0);
         double angle = Math.toDegrees(Math.acos(dot));
 
-        return angle <= 60.0;
+        int brightness = this.level().getMaxLocalRawBrightness(this.blockPosition());
+        double maxAngle = brightness < 7 ? 35.0 : 60.0;
+        return angle <= maxAngle;
     }
 
     public boolean hasVisualLineOfSight(Entity target) {
@@ -188,14 +191,26 @@ public final class SimulatedSurvivor extends FakePlayer {
     private void applyManualMovement() {
         if (Math.abs(strafeInput) < 0.001 && Math.abs(forwardInput) < 0.001) {
             this.setDeltaMovement(this.getDeltaMovement().scale(0.55));
+            lastStrafeInput = strafeInput;
             return;
+        }
+
+        double effectiveStrafe = strafeInput;
+        if (state.suppressionTicks() > 0 && forwardInput < 0.0) {
+            effectiveStrafe += Math.sin((this.tickCount + this.getId()) * 0.45) * 0.42;
+        }
+
+        boolean startingStrafe = Math.abs(lastStrafeInput) < 0.12 && Math.abs(effectiveStrafe) >= 0.2;
+        if (startingStrafe && state.tacticalMode() == SurvivorState.TacticalMode.COMBAT_REACTION
+            && this.onGround() && this.level().random.nextDouble() < 0.15) {
+            this.jumpFromGround();
         }
 
         Vec3 look = this.getLookAngle();
         Vec3 forward = new Vec3(look.x, 0, look.z).normalize();
         Vec3 right = new Vec3(-forward.z, 0, forward.x);
 
-        Vec3 motion = forward.scale(forwardInput).add(right.scale(strafeInput));
+        Vec3 motion = forward.scale(forwardInput).add(right.scale(effectiveStrafe));
         if (motion.lengthSqr() > 1.0) {
             motion = motion.normalize();
         }
@@ -203,6 +218,7 @@ public final class SimulatedSurvivor extends FakePlayer {
         double speed = this.isSprinting() ? 0.23 : 0.17;
         Vec3 next = this.getDeltaMovement().scale(0.35).add(motion.scale(speed));
         this.setDeltaMovement(next.x, this.getDeltaMovement().y, next.z);
+        lastStrafeInput = effectiveStrafe;
     }
 
     private float lerp(float current, float target, float maxStep) {

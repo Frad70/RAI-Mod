@@ -5,7 +5,10 @@ import com.raimod.entity.SimulatedSurvivor;
 import com.raimod.entity.SurvivorState;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
+import java.util.UUID;
 import net.minecraft.core.BlockPos;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.entity.Entity;
@@ -14,6 +17,8 @@ import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.phys.Vec3;
 
 public final class CombatReactionGoal implements Goal {
+    private final Map<UUID, Integer> lostSightTicks = new HashMap<>();
+    private final Map<UUID, BlockPos> lastKnownTargetPos = new HashMap<>();
     @Override
     public double score(SurvivorContext context) {
         Entity attacker = context.survivor().getLastHurtByMob();
@@ -39,6 +44,26 @@ public final class CombatReactionGoal implements Goal {
         }
 
         survivor.setCurrentCombatTarget(target.getUUID());
+
+        UUID botId = survivor.id();
+        if (survivor.isEntityVisible(target)) {
+            lostSightTicks.put(botId, 0);
+            lastKnownTargetPos.put(botId, target.blockPosition().immutable());
+        } else {
+            int lost = lostSightTicks.getOrDefault(botId, 0) + 1;
+            lostSightTicks.put(botId, lost);
+            if (lost > 300) {
+                BlockPos searchPos = lastKnownTargetPos.getOrDefault(botId, target.blockPosition());
+                context.integrations().baritone().setCoverGoal(survivor, searchPos);
+                Vec3 dir = Vec3.atCenterOf(searchPos).subtract(survivor.position());
+                if (dir.lengthSqr() > 1.0) {
+                    Vec3 planar = new Vec3(dir.x, 0, dir.z).normalize();
+                    double lookDot = survivor.getLookAngle().normalize().dot(planar);
+                    survivor.setMovementInput(0.0, lookDot > 0 ? 0.35 : -0.2);
+                }
+                return;
+            }
+        }
 
         float accuracy = context.integrations().physicalStats().getAccuracySkill(survivor.id());
         Vec3 aimPos = context.integrations().tacz().calculateLeadShot(
