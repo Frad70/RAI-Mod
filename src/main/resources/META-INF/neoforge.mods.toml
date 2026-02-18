@@ -1,0 +1,26 @@
+modLoader="javafml"
+loaderVersion="[4,)"
+license="All Rights Reserved"
+
+[[mods]]
+modId="raimod"
+version="${file.jarVersion}"
+displayName="RAI Mod"
+authors="RAI Team"
+description='''
+Adaptive autonomous survivor AI for NeoForge 1.21.1 servers.
+'''
+
+[[dependencies.raimod]]
+modId="neoforge"
+type="required"
+versionRange="[21.1.0,)"
+ordering="NONE"
+side="SERVER"
+
+[[dependencies.raimod]]
+modId="minecraft"
+type="required"
+versionRange="[1.21.1,1.22)"
+ordering="NONE"
+side="SERVER"
