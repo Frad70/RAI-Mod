@@ -2,6 +2,7 @@ package com.raimod.ai.behavior.goals;
 
 import com.raimod.ai.behavior.SurvivorContext;
 import com.raimod.entity.SurvivorState;
+import net.minecraft.core.BlockPos;
 import net.minecraft.world.entity.Entity;
 
 public final class BaseDefenseGoal implements Goal {
@@ -23,9 +24,12 @@ public final class BaseDefenseGoal implements Goal {
                 context.survivor(),
                 target,
                 context.survivor().getMainHandItem(),
-                context.config().baseAimScatterDegrees(),
+                context.survivor().adjustedAimScatter(context.config().baseAimScatterDegrees()),
                 accuracy
             );
+
+            BlockPos around = target.blockPosition().above(3);
+            context.integrations().baritone().setCoverGoal(context.survivor(), around);
         }
 
         context.survivor().setState(context.survivor().state().withMode(SurvivorState.TacticalMode.BASE_DEFENSE));

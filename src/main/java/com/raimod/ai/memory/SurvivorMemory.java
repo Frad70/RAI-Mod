@@ -2,6 +2,7 @@ package com.raimod.ai.memory;
 
 import com.raimod.entity.SimulatedSurvivor;
 import com.raimod.entity.SurvivorState;
+import com.raimod.integration.SurvivorChatBridge;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Comparator;
@@ -13,11 +14,20 @@ import java.util.UUID;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.server.MinecraftServer;
+import net.minecraft.server.level.ServerLevel;
+import net.minecraft.tags.BlockTags;
 import net.minecraft.util.Mth;
+import net.minecraft.world.entity.Entity;
+import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.entity.item.ItemEntity;
 import net.minecraft.world.item.ItemStack;
+import net.minecraft.world.level.block.Block;
+import net.minecraft.world.level.block.Blocks;
+import net.minecraft.world.level.block.PressurePlateBlock;
 
 public final class SurvivorMemory {
+    public static final int DEFAULT_HOME_CLAIM_RADIUS = 24;
+
     private final UUID survivorId;
     private final List<RaidTargetKnowledge> raidTargets;
     private final List<WorldKnowledgePoint> worldPoints;
@@ -29,6 +39,9 @@ public final class SurvivorMemory {
     private final Deque<String> combatLog;
     private SurvivorState.TacticalMode currentMode;
     private BlockPos homePosition;
+    private HomeBase homeBase;
+    private long nextWindowCheckTick;
+    private long nextTrapCheckTick;
 
     private SurvivorMemory(UUID survivorId) {
         this.survivorId = survivorId;
@@ -42,6 +55,9 @@ public final class SurvivorMemory {
         this.combatLog = new ArrayDeque<>();
         this.currentMode = SurvivorState.TacticalMode.SCOUTING;
         this.homePosition = BlockPos.ZERO;
+        this.homeBase = null;
+        this.nextWindowCheckTick = 0;
+        this.nextTrapCheckTick = 0;
     }
 
     public static SurvivorMemory createEmpty(UUID survivorId) {
@@ -104,6 +120,142 @@ public final class SurvivorMemory {
         this.homePosition = homePosition.immutable();
     }
 
+    public HomeBase homeBase() {
+        return homeBase;
+    }
+
+    public boolean hasHomeBase() {
+        return homeBase != null;
+    }
+
+    public void claimHomeBase(BlockPos center, int claimRadius, List<BlockPos> containerPos) {
+        List<BlockPos> normalizedContainers = containerPos.stream().map(BlockPos::immutable).toList();
+        this.homeBase = new HomeBase(center.immutable(), Math.max(8, claimRadius), normalizedContainers);
+        this.homePosition = center.immutable();
+    }
+
+    public void maybeClaimHomeBase(BlockPos bedPos, BlockPos containerPos, int claimRadius) {
+        if (bedPos == null || containerPos == null || hasHomeBase()) {
+            return;
+        }
+        if (bedPos.distSqr(containerPos) > 64.0) {
+            return;
+        }
+        claimHomeBase(bedPos, claimRadius, List.of(containerPos));
+    }
+
+    public boolean shouldReturnHome(boolean isNight, SimulatedSurvivor survivor, double storagePriorityThreshold) {
+        if (!hasHomeBase()) {
+            return false;
+        }
+
+        if (isNight) {
+            return true;
+        }
+
+        int used = 0;
+        int total = survivor.getInventory().getContainerSize();
+        for (int i = 0; i < total; i++) {
+            if (!survivor.getInventory().getItem(i).isEmpty()) {
+                used++;
+            }
+        }
+        return total > 0 && (used / (double) total) >= storagePriorityThreshold;
+    }
+
+    public boolean isHostileInsideHome(Entity entity) {
+        if (!hasHomeBase() || entity == null) {
+            return false;
+        }
+        if (entity.getUUID().equals(survivorId)) {
+            return false;
+        }
+        if (relationOf(entity.getUUID()) > 0.0f) {
+            return false;
+        }
+        HomeBase base = homeBase;
+        return base.center().distSqr(entity.blockPosition()) <= (long) base.claimRadius() * base.claimRadius();
+    }
+
+    public void triggerHomeDefense(SimulatedSurvivor survivor, SurvivorChatBridge chatBridge, Entity intruder) {
+        if (intruder == null || !isHostileInsideHome(intruder)) {
+            return;
+        }
+        setCurrentMode(SurvivorState.TacticalMode.DEFEND_HOME);
+        survivor.setState(survivor.state().withMode(SurvivorState.TacticalMode.DEFEND_HOME));
+        if (chatBridge != null) {
+            chatBridge.sendThreatWarning(survivor, intruder.getName().getString());
+        }
+    }
+
+    public BlockPos pickWindowScanPosition(ServerLevel level, long gameTime, int intervalTicks) {
+        if (!hasHomeBase() || gameTime < nextWindowCheckTick || currentMode != SurvivorState.TacticalMode.DEFEND_HOME) {
+            return null;
+        }
+
+        BlockPos center = homeBase.center();
+        int radius = Math.min(homeBase.claimRadius(), 10);
+        BlockPos best = null;
+        double bestDistance = Double.MAX_VALUE;
+
+        for (int x = -radius; x <= radius; x++) {
+            for (int y = -2; y <= 3; y++) {
+                for (int z = -radius; z <= radius; z++) {
+                    BlockPos pos = center.offset(x, y, z);
+                    if (!isWindowLike(level.getBlockState(pos).getBlock())) {
+                        continue;
+                    }
+                    double d = center.distSqr(pos);
+                    if (d < bestDistance) {
+                        bestDistance = d;
+                        best = pos.immutable();
+                    }
+                }
+            }
+        }
+
+        nextWindowCheckTick = gameTime + Math.max(20, intervalTicks);
+        return best;
+    }
+
+    public TrapAlert detectNearbyTrap(ServerLevel level, SimulatedSurvivor survivor, long gameTime, int intervalTicks) {
+        if (!hasHomeBase() || gameTime < nextTrapCheckTick) {
+            return null;
+        }
+
+        int radius = homeBase.claimRadius();
+        BlockPos center = homeBase.center();
+        nextTrapCheckTick = gameTime + Math.max(20, intervalTicks);
+
+        for (int x = -radius; x <= radius; x++) {
+            for (int y = -3; y <= 3; y++) {
+                for (int z = -radius; z <= radius; z++) {
+                    BlockPos pos = center.offset(x, y, z);
+                    Block block = level.getBlockState(pos).getBlock();
+                    if (!isSuspiciousTrap(block)) {
+                        continue;
+                    }
+                    boolean nonAllyNearby = level.getEntitiesOfClass(LivingEntity.class,
+                        new net.minecraft.world.phys.AABB(pos).inflate(4.0),
+                        e -> e.isAlive() && !e.getUUID().equals(survivor.id()) && relationOf(e.getUUID()) <= 0.0f).size() > 0;
+                    if (nonAllyNearby) {
+                        return new TrapAlert(pos.immutable(), block == Blocks.TNT ? "tnt" : "pressure_plate");
+                    }
+                }
+            }
+        }
+        return null;
+    }
+
+    private boolean isWindowLike(Block block) {
+        return block == Blocks.GLASS || block == Blocks.GLASS_PANE || block == Blocks.TINTED_GLASS
+            || (!block.defaultBlockState().is(BlockTags.IMPERMEABLE) && !block.defaultBlockState().canOcclude());
+    }
+
+    private boolean isSuspiciousTrap(Block block) {
+        return block == Blocks.TNT || block instanceof PressurePlateBlock;
+    }
+
     public List<BlockPos> dangerousBlocks() {
         return List.copyOf(dangerousBlocks);
     }
@@ -120,6 +272,17 @@ public final class SurvivorMemory {
     public void setKnownChests(List<BlockPos> chests) {
         knownChests.clear();
         knownChests.addAll(chests);
+    }
+
+    public void rememberHomeContainer(BlockPos containerPos) {
+        if (containerPos == null || homeBase == null) {
+            return;
+        }
+        if (!homeBase.containerPos().contains(containerPos)) {
+            List<BlockPos> extended = new ArrayList<>(homeBase.containerPos());
+            extended.add(containerPos.immutable());
+            homeBase = new HomeBase(homeBase.center(), homeBase.claimRadius(), List.copyOf(extended));
+        }
     }
 
     public List<String> priorityLoot() {
@@ -273,6 +436,12 @@ public final class SurvivorMemory {
                 worldPoints.set(i, point.withNeedsRevalidation(true));
             }
         }
+    }
+
+    public record TrapAlert(BlockPos pos, String type) {
+    }
+
+    public record HomeBase(BlockPos center, int claimRadius, List<BlockPos> containerPos) {
     }
 
     public record CombatLog(Deque<String> lines) {

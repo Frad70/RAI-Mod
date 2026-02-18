@@ -50,6 +50,26 @@ public final class SurvivorChatBridge {
         broadcastNearby(survivor, withName(survivor, body), 40.0);
     }
 
+    public void sendAfkCheck(SimulatedSurvivor survivor, String playerName) {
+        String body = pick(PhraseCategory.AFK_BAIT, survivor, playerName, survivor.blockPosition());
+        broadcastNearby(survivor, withName(survivor, body), 56.0);
+    }
+
+    public void sendSpyglassLine(SimulatedSurvivor survivor, String playerName) {
+        String body = pick(PhraseCategory.SPYGLASS, survivor, playerName, survivor.blockPosition());
+        broadcastNearby(survivor, withName(survivor, body), 96.0);
+    }
+
+    public void sendSocialBait(SimulatedSurvivor survivor, String playerName) {
+        String body = pick(PhraseCategory.SOCIAL_BAIT, survivor, playerName, survivor.blockPosition());
+        broadcastNearby(survivor, withName(survivor, body), 36.0);
+    }
+
+    public void sendFakeSurrender(SimulatedSurvivor survivor) {
+        String body = pick(PhraseCategory.FAKE_SURRENDER, survivor, "", survivor.blockPosition());
+        broadcastNearby(survivor, withName(survivor, body), 40.0);
+    }
+
     public boolean beginInvitationRitual(SimulatedSurvivor survivor, BlockPos buildingCenter, Direction side) {
         BlockPos waitPoint = buildingCenter.relative(side, 12);
         String msg = withName(survivor, "Come out to the " + side.getName() + " side, let's talk.");
@@ -126,13 +146,38 @@ public final class SurvivorChatBridge {
             new WeightedPhrase("This {name} is mine.", 3),
             new WeightedPhrase("Loot secured: {name}.", 3)
         )));
+
+        phraseBook.put(PhraseCategory.AFK_BAIT, new ArrayList<>(List.of(
+            new WeightedPhrase("You okay?", 4),
+            new WeightedPhrase("Easy loot found here...", 4),
+            new WeightedPhrase("I see you, {name}.", 3)
+        )));
+
+        phraseBook.put(PhraseCategory.SPYGLASS, new ArrayList<>(List.of(
+            new WeightedPhrase("Nice view from here!", 5),
+            new WeightedPhrase("Don't move, I'm taking a picture.", 5)
+        )));
+
+        phraseBook.put(PhraseCategory.SOCIAL_BAIT, new ArrayList<>(List.of(
+            new WeightedPhrase("Relax, {name}, I'm friendly... for now.", 4),
+            new WeightedPhrase("Don't panic. Just crouch and talk.", 3)
+        )));
+
+        phraseBook.put(PhraseCategory.FAKE_SURRENDER, new ArrayList<>(List.of(
+            new WeightedPhrase("Alright, alright, I surrender!", 4),
+            new WeightedPhrase("Take this and don't shoot!", 4)
+        )));
     }
 
     private enum PhraseCategory {
         GREETING,
         TAUNT,
         PANIC,
-        LOOT_FOUND
+        LOOT_FOUND,
+        AFK_BAIT,
+        SPYGLASS,
+        SOCIAL_BAIT,
+        FAKE_SURRENDER
     }
 
     private record WeightedPhrase(String template, int weight) {
