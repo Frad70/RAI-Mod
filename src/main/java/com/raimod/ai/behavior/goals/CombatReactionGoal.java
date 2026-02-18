@@ -1,10 +1,16 @@
 package com.raimod.ai.behavior.goals;
 
 import com.raimod.ai.behavior.SurvivorContext;
+import com.raimod.entity.SimulatedSurvivor;
 import com.raimod.entity.SurvivorState;
+import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.List;
 import net.minecraft.core.BlockPos;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.entity.Entity;
+import net.minecraft.world.entity.LivingEntity;
+import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.phys.Vec3;
 
 public final class CombatReactionGoal implements Goal {
@@ -13,30 +19,31 @@ public final class CombatReactionGoal implements Goal {
         Entity attacker = context.survivor().getLastHurtByMob();
         boolean loudSoundNearby = context.integrations().hasLoudSoundNear(context.survivor(), 32);
         if (attacker != null) {
-            return 1.2;
+            return 1.3;
         }
-        return loudSoundNearby ? 0.9 : 0.0;
+        return loudSoundNearby ? 0.95 : 0.0;
     }
 
     @Override
     public void execute(SurvivorContext context) {
-        var survivor = context.survivor();
-        Entity attacker = survivor.getLastHurtByMob();
-
-        if (attacker == null && context.integrations().hasLoudSoundNear(survivor, 32)) {
-            attacker = context.server().overworld().getNearestPlayer(survivor, 32.0);
-        }
-        if (attacker == null) {
+        SimulatedSurvivor survivor = context.survivor();
+        LivingEntity target = getPriorityTarget(context);
+        if (target == null) {
+            survivor.clearMovementInput();
             return;
         }
 
-        Vec3 attackerEye = attacker.getEyePosition();
-        survivor.aimAt(attackerEye);
+        LivingEntity betrayalTarget = maybePickBetrayalTarget(context, target);
+        if (betrayalTarget != null) {
+            target = betrayalTarget;
+        }
+
+        survivor.setCurrentCombatTarget(target.getUUID());
 
         float accuracy = context.integrations().physicalStats().getAccuracySkill(survivor.id());
         Vec3 aimPos = context.integrations().tacz().calculateLeadShot(
             survivor,
-            attacker,
+            target,
             survivor.getMainHandItem(),
             context.config().baseAimScatterDegrees(),
             accuracy
@@ -49,7 +56,7 @@ public final class CombatReactionGoal implements Goal {
             .withSuppressionTicks(20));
 
         double strafe = survivor.tickCount % 20 < 10 ? -1.0 : 1.0;
-        survivor.setMovementInput(strafe, 0.15);
+        survivor.setMovementInput(strafe, 0.18);
 
         if (context.integrations().tacz().isGunEmpty(survivor.getMainHandItem())) {
             survivor.setState(survivor.state().withMode(SurvivorState.TacticalMode.RELOAD));
@@ -58,6 +65,7 @@ public final class CombatReactionGoal implements Goal {
         boolean lowHealth = survivor.getHealth() <= (survivor.getMaxHealth() * 0.6f);
         boolean suppressed = survivor.state().suppressionTicks() > 0;
         if (lowHealth || suppressed || survivor.state().tacticalMode() == SurvivorState.TacticalMode.RELOAD) {
+            Vec3 attackerEye = target.getEyePosition();
             BlockPos cover = context.integrations().findCoverPosition((ServerLevel) survivor.level(), attackerEye, survivor);
             if (cover != null) {
                 context.integrations().baritone().setCoverGoal(survivor, cover);
@@ -72,5 +80,107 @@ public final class CombatReactionGoal implements Goal {
         if (survivor.state().reactionFireTicks() <= 0) {
             survivor.clearMovementInput();
         }
+    }
+
+    private LivingEntity getPriorityTarget(SurvivorContext context) {
+        SimulatedSurvivor survivor = context.survivor();
+        ServerLevel level = context.server().overworld();
+
+        double baseRange = 48.0 * awarenessModifier(survivor.state().tacticalMode());
+        List<LivingEntity> candidates = level.getEntitiesOfClass(LivingEntity.class,
+            survivor.getBoundingBox().inflate(baseRange),
+            entity -> entity.isAlive() && entity != survivor);
+
+        List<ScoredTarget> scored = new ArrayList<>();
+        for (LivingEntity entity : candidates) {
+            double effectiveRange = baseRange;
+            if (isStealthed(level, entity)) {
+                effectiveRange *= 0.4;
+            }
+
+            double distance = survivor.distanceTo(entity);
+            if (distance > effectiveRange) {
+                continue;
+            }
+
+            if (!survivor.isEntityVisible(entity)) {
+                continue;
+            }
+
+            double score = (1.0 / Math.max(1.0, distance))
+                * (hasGun(entity) ? 2.0 : 1.0)
+                * (isLookingAtMe(entity, survivor) ? 1.5 : 1.0);
+
+            if (entity instanceof SimulatedSurvivor otherBot && otherBot.getGameProfile().getName().startsWith("rai_")
+                && survivor.trustFactor() < 0.35f) {
+                score *= 2.2;
+            }
+
+            scored.add(new ScoredTarget(entity, score));
+        }
+
+        return scored.stream()
+            .max(Comparator.comparingDouble(ScoredTarget::score))
+            .map(ScoredTarget::entity)
+            .orElse(null);
+    }
+
+    private LivingEntity maybePickBetrayalTarget(SurvivorContext context, LivingEntity currentTarget) {
+        SimulatedSurvivor survivor = context.survivor();
+        if (survivor.level().random.nextDouble() > 0.10) {
+            return null;
+        }
+
+        List<SimulatedSurvivor> nearbyBots = context.server().overworld().getEntitiesOfClass(
+            SimulatedSurvivor.class,
+            survivor.getBoundingBox().inflate(32.0),
+            other -> other != survivor && currentTarget.getUUID().equals(other.currentCombatTarget())
+        );
+
+        if (nearbyBots.isEmpty()) {
+            return null;
+        }
+
+        return nearbyBots.get(survivor.level().random.nextInt(nearbyBots.size()));
+    }
+
+    private double awarenessModifier(SurvivorState.TacticalMode mode) {
+        if (mode == SurvivorState.TacticalMode.FARMING || mode == SurvivorState.TacticalMode.SCOUTING) {
+            return 0.65;
+        }
+        return 1.0;
+    }
+
+    private boolean hasGun(LivingEntity entity) {
+        return !entity.getMainHandItem().isEmpty() && !entity.getMainHandItem().isEdible();
+    }
+
+    private boolean isLookingAtMe(LivingEntity entity, SimulatedSurvivor me) {
+        Vec3 look = entity.getLookAngle().normalize();
+        Vec3 toMe = me.getEyePosition().subtract(entity.getEyePosition()).normalize();
+        return look.dot(toMe) > 0.75;
+    }
+
+    private boolean isStealthed(ServerLevel level, LivingEntity entity) {
+        if (!(entity instanceof Player player) || !player.isShiftKeyDown()) {
+            return false;
+        }
+
+        BlockPos pos = entity.blockPosition();
+        for (int x = -2; x <= 2; x++) {
+            for (int y = -1; y <= 3; y++) {
+                for (int z = -2; z <= 2; z++) {
+                    BlockPos scan = pos.offset(x, y, z);
+                    if (!level.getBlockState(scan).isAir() && level.getBlockState(scan).isCollisionShapeFullBlock(level, scan)
+                        && scan.getY() >= pos.getY() + 1) {
+                        return true;
+                    }
+                }
+            }
+        }
+        return false;
+    }
+
+    private record ScoredTarget(LivingEntity entity, double score) {
     }
 }

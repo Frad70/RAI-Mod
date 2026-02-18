@@ -6,16 +6,25 @@ import com.raimod.ai.behavior.SurvivorContext;
 import com.raimod.ai.memory.SurvivorMemory;
 import com.raimod.config.RAIServerConfig;
 import com.raimod.integration.ModIntegrationRegistry;
+import java.util.HashMap;
+import java.util.Map;
 import java.util.Objects;
 import java.util.UUID;
 import net.minecraft.server.level.ServerLevel;
+import net.minecraft.util.Mth;
+import net.minecraft.world.entity.Entity;
+import net.minecraft.world.phys.HitResult;
 import net.minecraft.world.phys.Vec3;
+import net.minecraft.world.level.ClipContext;
 import net.neoforged.neoforge.common.util.FakePlayer;
 
 public final class SimulatedSurvivor extends FakePlayer {
     private final UUID survivorId;
     private final SurvivorMemory memory;
     private final BehaviorEngine behaviorEngine;
+    private final float trustFactor;
+    private final Map<UUID, Integer> recentDamageByEntityTick;
+
     private SurvivorState state;
     private ModIntegrationRegistry integrations;
     private RAIServerConfig.RuntimeValues runtime;
@@ -23,6 +32,7 @@ public final class SimulatedSurvivor extends FakePlayer {
     private Vec3 lookTarget;
     private double strafeInput;
     private double forwardInput;
+    private UUID currentCombatTarget;
 
     public SimulatedSurvivor(ServerLevel level, GameProfile profile, RAIServerConfig.RuntimeValues config) {
         super(level, profile);
@@ -32,6 +42,8 @@ public final class SimulatedSurvivor extends FakePlayer {
         this.state = SurvivorState.freshSpawn(config.minActiveChunks(), config.maxActiveChunks());
         this.runtime = config;
         this.lookTarget = this.getEyePosition().add(this.getLookAngle().scale(3.0));
+        this.trustFactor = level.random.nextFloat();
+        this.recentDamageByEntityTick = new HashMap<>();
     }
 
     public static SimulatedSurvivor bootstrap(UUID id, RAIServerConfig.RuntimeValues config, ServerLevel level) {
@@ -55,6 +67,18 @@ public final class SimulatedSurvivor extends FakePlayer {
         this.state = Objects.requireNonNull(newState);
     }
 
+    public float trustFactor() {
+        return trustFactor;
+    }
+
+    public UUID currentCombatTarget() {
+        return currentCombatTarget;
+    }
+
+    public void setCurrentCombatTarget(UUID targetId) {
+        this.currentCombatTarget = targetId;
+    }
+
     public void configureRuntime(ModIntegrationRegistry integrations, RAIServerConfig.RuntimeValues runtime) {
         this.integrations = integrations;
         this.runtime = runtime;
@@ -66,6 +90,11 @@ public final class SimulatedSurvivor extends FakePlayer {
 
         if (this.server == null || integrations == null || runtime == null) {
             return;
+        }
+
+        Entity lastHurt = this.getLastHurtByMob();
+        if (lastHurt != null) {
+            recentDamageByEntityTick.put(lastHurt.getUUID(), this.tickCount);
         }
 
         state = state.withDynamicChunkBudget(this.server, runtime);
@@ -97,6 +126,39 @@ public final class SimulatedSurvivor extends FakePlayer {
     public void clearMovementInput() {
         this.strafeInput = 0.0;
         this.forwardInput = 0.0;
+    }
+
+    public boolean isEntityVisible(Entity target) {
+        if (target == null || !target.isAlive()) {
+            return false;
+        }
+
+        if (!this.canSee(target) || !hasVisualLineOfSight(target)) {
+            return false;
+        }
+
+        if (wasRecentlyDamagedBy(target, 100)) {
+            return true;
+        }
+
+        Vec3 look = this.getLookAngle().normalize();
+        Vec3 toTarget = target.getEyePosition().subtract(this.getEyePosition()).normalize();
+        double dot = Mth.clamp(look.dot(toTarget), -1.0, 1.0);
+        double angle = Math.toDegrees(Math.acos(dot));
+
+        return angle <= 60.0;
+    }
+
+    public boolean hasVisualLineOfSight(Entity target) {
+        Vec3 from = this.getEyePosition();
+        Vec3 to = target.getEyePosition();
+        HitResult hit = this.level().clip(new ClipContext(from, to, ClipContext.Block.VISUAL, ClipContext.Fluid.NONE, this));
+        return hit.getType() == HitResult.Type.MISS;
+    }
+
+    public boolean wasRecentlyDamagedBy(Entity target, int ticks) {
+        Integer tick = recentDamageByEntityTick.get(target.getUUID());
+        return tick != null && (this.tickCount - tick) <= ticks;
     }
 
     private void updateRotationFromLookTarget() {
@@ -151,7 +213,7 @@ public final class SimulatedSurvivor extends FakePlayer {
     }
 
     private float lerpAngle(float current, float target, float maxStep) {
-        float delta = net.minecraft.util.Mth.wrapDegrees(target - current);
+        float delta = Mth.wrapDegrees(target - current);
         if (delta > maxStep) {
             delta = maxStep;
         }
