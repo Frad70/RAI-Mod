@@ -35,6 +35,9 @@ public final class SimulatedSurvivor extends FakePlayer {
     private double lastStrafeInput;
     private UUID currentCombatTarget;
 
+    private int inventoryActionCooldown;
+    private int lastInteractedSlot;
+
     public SimulatedSurvivor(ServerLevel level, GameProfile profile, RAIServerConfig.RuntimeValues config) {
         super(level, profile);
         this.survivorId = profile.getId();
@@ -45,6 +48,7 @@ public final class SimulatedSurvivor extends FakePlayer {
         this.lookTarget = this.getEyePosition().add(this.getLookAngle().scale(3.0));
         this.trustFactor = level.random.nextFloat();
         this.recentDamageByEntityTick = new HashMap<>();
+        this.lastInteractedSlot = -1;
     }
 
     public static SimulatedSurvivor bootstrap(UUID id, RAIServerConfig.RuntimeValues config, ServerLevel level) {
@@ -80,6 +84,45 @@ public final class SimulatedSurvivor extends FakePlayer {
         this.currentCombatTarget = targetId;
     }
 
+    public boolean canPerformActions() {
+        return inventoryActionCooldown <= 0;
+    }
+
+    public int inventoryActionCooldown() {
+        return inventoryActionCooldown;
+    }
+
+    public void markInventoryInteraction(int slot) {
+        int base = 1 + this.level().random.nextInt(4);
+        if (lastInteractedSlot >= 0 && Math.abs(slot - lastInteractedSlot) > 3) {
+            base += 2;
+        }
+        inventoryActionCooldown = base;
+        lastInteractedSlot = slot;
+    }
+
+    public boolean swapSelectedSlotWithLatency(int targetSlot) {
+        if (!canPerformActions() || targetSlot < 0 || targetSlot >= this.getInventory().getContainerSize()) {
+            return false;
+        }
+        this.getInventory().selected = targetSlot;
+        markInventoryInteraction(targetSlot);
+        return true;
+    }
+
+    public boolean dropSlotWithLatency(int slot) {
+        if (!canPerformActions() || slot < 0 || slot >= this.getInventory().getContainerSize()) {
+            return false;
+        }
+        if (this.getInventory().getItem(slot).isEmpty()) {
+            return false;
+        }
+        this.getInventory().selected = slot;
+        this.drop(this.getInventory().removeItem(slot, 1), false);
+        markInventoryInteraction(slot);
+        return true;
+    }
+
     public void configureRuntime(ModIntegrationRegistry integrations, RAIServerConfig.RuntimeValues runtime) {
         this.integrations = integrations;
         this.runtime = runtime;
@@ -91,6 +134,10 @@ public final class SimulatedSurvivor extends FakePlayer {
 
         if (this.server == null || integrations == null || runtime == null) {
             return;
+        }
+
+        if (inventoryActionCooldown > 0) {
+            inventoryActionCooldown--;
         }
 
         Entity lastHurt = this.getLastHurtByMob();
@@ -179,8 +226,9 @@ public final class SimulatedSurvivor extends FakePlayer {
         float targetYaw = (float) (Math.toDegrees(Math.atan2(delta.z, delta.x)) - 90.0);
         float targetPitch = (float) (-Math.toDegrees(Math.atan2(delta.y, xz)));
 
-        float yaw = lerpAngle(this.getYRot(), targetYaw, 5.0f);
-        float pitch = lerp(this.getXRot(), targetPitch, 5.0f);
+        float turnSpeed = (state.tacticalMode() == SurvivorState.TacticalMode.COMBAT_REACTION && xz < 5.0) ? 9.0f : 5.0f;
+        float yaw = lerpAngle(this.getYRot(), targetYaw, turnSpeed);
+        float pitch = lerp(this.getXRot(), targetPitch, turnSpeed);
 
         this.setYRot(yaw);
         this.setXRot(pitch);

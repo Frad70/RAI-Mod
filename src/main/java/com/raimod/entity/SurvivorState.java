@@ -69,6 +69,7 @@ public record SurvivorState(
         BASE_BUILDING,
         BASE_DEFENSE,
         COMBAT_REACTION,
+        SEARCHING,
         RELOAD,
         HEALING,
         RAID,

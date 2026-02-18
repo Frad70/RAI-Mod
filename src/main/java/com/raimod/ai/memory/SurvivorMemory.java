@@ -1,5 +1,6 @@
 package com.raimod.ai.memory;
 
+import com.raimod.entity.SimulatedSurvivor;
 import com.raimod.entity.SurvivorState;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
@@ -13,6 +14,7 @@ import net.minecraft.core.BlockPos;
 import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.util.Mth;
+import net.minecraft.world.entity.item.ItemEntity;
 import net.minecraft.world.item.ItemStack;
 
 public final class SurvivorMemory {
@@ -23,6 +25,7 @@ public final class SurvivorMemory {
     private final List<BlockPos> knownChests;
     private final List<String> priorityLoot;
     private final Map<UUID, Float> relations;
+    private final Map<UUID, BlockPos> lastKnownPositions;
     private final Deque<String> combatLog;
     private SurvivorState.TacticalMode currentMode;
     private BlockPos homePosition;
@@ -35,6 +38,7 @@ public final class SurvivorMemory {
         this.knownChests = new ArrayList<>();
         this.priorityLoot = new ArrayList<>(List.of("tacz", "ammo", "medkit"));
         this.relations = new HashMap<>();
+        this.lastKnownPositions = new HashMap<>();
         this.combatLog = new ArrayDeque<>();
         this.currentMode = SurvivorState.TacticalMode.SCOUTING;
         this.homePosition = BlockPos.ZERO;
@@ -149,6 +153,58 @@ public final class SurvivorMemory {
         return seenScore > currentScore;
     }
 
+    public void setLastKnownPosition(UUID targetId, BlockPos pos) {
+        lastKnownPositions.put(targetId, pos.immutable());
+    }
+
+    public BlockPos lastKnownPosition(UUID targetId) {
+        return lastKnownPositions.getOrDefault(targetId, BlockPos.ZERO);
+    }
+
+    public void clearLastKnownPosition(UUID targetId) {
+        lastKnownPositions.remove(targetId);
+    }
+
+    public boolean cleanInventory(SimulatedSurvivor survivor) {
+        boolean full = true;
+        for (int i = 0; i < survivor.getInventory().getContainerSize(); i++) {
+            if (survivor.getInventory().getItem(i).isEmpty()) {
+                full = false;
+                break;
+            }
+        }
+        if (!full) {
+            return false;
+        }
+
+        List<ItemEntity> nearbyDrops = survivor.level().getEntitiesOfClass(
+            ItemEntity.class,
+            survivor.getBoundingBox().inflate(6.0),
+            drop -> !drop.getItem().isEmpty() && isPriorityLoot(drop.getItem())
+        );
+
+        if (nearbyDrops.isEmpty()) {
+            return false;
+        }
+
+        int weakestSlot = -1;
+        int weakestScore = Integer.MAX_VALUE;
+        for (int i = 0; i < survivor.getInventory().getContainerSize(); i++) {
+            ItemStack stack = survivor.getInventory().getItem(i);
+            int score = lootScore(stack);
+            if (score < weakestScore) {
+                weakestScore = score;
+                weakestSlot = i;
+            }
+        }
+
+        if (weakestSlot < 0 || !survivor.canPerformActions()) {
+            return false;
+        }
+
+        return survivor.dropSlotWithLatency(weakestSlot);
+    }
+
     private int lootScore(ItemStack stack) {
         if (stack == null || stack.isEmpty()) {
             return 0;
@@ -156,6 +212,12 @@ public final class SurvivorMemory {
         String id = BuiltInRegistries.ITEM.getKey(stack.getItem()).toString().toLowerCase();
 
         int score = 5;
+        if (id.contains("dirt")) {
+            score -= 4;
+        }
+        if (id.contains("cobblestone")) {
+            score -= 2;
+        }
         if (id.contains("tacz")) {
             score += 50;
         }

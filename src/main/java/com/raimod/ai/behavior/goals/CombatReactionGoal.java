@@ -18,7 +18,7 @@ import net.minecraft.world.phys.Vec3;
 
 public final class CombatReactionGoal implements Goal {
     private final Map<UUID, Integer> lostSightTicks = new HashMap<>();
-    private final Map<UUID, BlockPos> lastKnownTargetPos = new HashMap<>();
+
     @Override
     public double score(SurvivorContext context) {
         Entity attacker = context.survivor().getLastHurtByMob();
@@ -32,6 +32,10 @@ public final class CombatReactionGoal implements Goal {
     @Override
     public void execute(SurvivorContext context) {
         SimulatedSurvivor survivor = context.survivor();
+        if (!survivor.canPerformActions()) {
+            return;
+        }
+
         LivingEntity target = getPriorityTarget(context);
         if (target == null) {
             survivor.clearMovementInput();
@@ -44,26 +48,33 @@ public final class CombatReactionGoal implements Goal {
         }
 
         survivor.setCurrentCombatTarget(target.getUUID());
-
         UUID botId = survivor.id();
-        if (survivor.isEntityVisible(target)) {
-            lostSightTicks.put(botId, 0);
-            lastKnownTargetPos.put(botId, target.blockPosition().immutable());
-        } else {
+
+        if (!survivor.isEntityVisible(target)) {
             int lost = lostSightTicks.getOrDefault(botId, 0) + 1;
             lostSightTicks.put(botId, lost);
+
+            survivor.memory().setLastKnownPosition(target.getUUID(), target.blockPosition());
+            BlockPos lastKnown = survivor.memory().lastKnownPosition(target.getUUID());
+
+            survivor.setState(survivor.state().withMode(SurvivorState.TacticalMode.SEARCHING));
+            context.integrations().baritone().setCoverGoal(survivor, lastKnown);
+
+            double sweep = Math.sin((survivor.tickCount + survivor.getId()) * 0.18) * 45.0;
+            Vec3 toLastKnown = Vec3.atCenterOf(lastKnown).subtract(survivor.getEyePosition());
+            Vec3 looked = toLastKnown.normalize().yRot((float) Math.toRadians(sweep));
+            survivor.aimAt(survivor.getEyePosition().add(looked.scale(6.0)));
+
             if (lost > 300) {
-                BlockPos searchPos = lastKnownTargetPos.getOrDefault(botId, target.blockPosition());
-                context.integrations().baritone().setCoverGoal(survivor, searchPos);
-                Vec3 dir = Vec3.atCenterOf(searchPos).subtract(survivor.position());
-                if (dir.lengthSqr() > 1.0) {
-                    Vec3 planar = new Vec3(dir.x, 0, dir.z).normalize();
-                    double lookDot = survivor.getLookAngle().normalize().dot(planar);
-                    survivor.setMovementInput(0.0, lookDot > 0 ? 0.35 : -0.2);
-                }
-                return;
+                lostSightTicks.remove(botId);
+                survivor.memory().clearLastKnownPosition(target.getUUID());
+                survivor.setCurrentCombatTarget(null);
             }
+            return;
         }
+
+        lostSightTicks.put(botId, 0);
+        survivor.memory().setLastKnownPosition(target.getUUID(), target.blockPosition());
 
         float accuracy = context.integrations().physicalStats().getAccuracySkill(survivor.id());
         Vec3 aimPos = context.integrations().tacz().calculateLeadShot(
